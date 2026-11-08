@@ -1,0 +1,4 @@
+# Файлы для Linux-сервера должны оставаться с переводами строк LF, иначе bash/systemd их не поймут
+*.sh       text eol=lf
+*.service  text eol=lf
+*.bat      text eol=crlf

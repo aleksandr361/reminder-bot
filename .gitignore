@@ -1,0 +1,18 @@
+# Секреты и личные данные — никогда не коммитить
+.env
+reminders.db
+reminders.db-journal
+*.db
+deploy/server.txt
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# Система
+Thumbs.db
+desktop.ini
+.DS_Store

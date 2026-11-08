@@ -1,0 +1,24 @@
+[Unit]
+Description=Telegram reminder bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reminderbot
+Group=reminderbot
+WorkingDirectory=/opt/reminder-bot
+ExecStart=/opt/reminder-bot/venv/bin/python main.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+
+# Бот может писать только в свою папку
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/reminder-bot
+
+[Install]
+WantedBy=multi-user.target
