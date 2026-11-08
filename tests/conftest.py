@@ -98,6 +98,10 @@ class FakeBot:
         self.deleted.append((chat_id, message_id))
         return True
 
+    async def delete_messages(self, chat_id, message_ids, **kwargs):
+        self.deleted.extend((chat_id, m) for m in message_ids)
+        return True
+
 
 @pytest.fixture
 def main_module():

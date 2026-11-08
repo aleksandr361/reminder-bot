@@ -87,6 +87,15 @@ def fmt(main_module, d):
     return main_module.format_date(d)
 
 
+def step_text(msg):
+    """Все ответы бота на действие одним текстом (правило и задание могут прийти двумя сообщениями)."""
+    return "\n\n".join(m.text for m in msg.answered)
+
+
+def deleted_ids(bot):
+    return {mid for _, mid in bot.deleted}
+
+
 # ---------- 1. Меню ----------
 
 async def test_menu_has_five_types_and_cancel_keyboard(send, fsm):
@@ -294,8 +303,11 @@ async def to_month_mode(send, press, state, text="Оплатить аренду"
 
 async def test_month_mode_step(send, press, fsm):
     await make_user(1, tz="UTC")
-    mode_msg = await to_month_mode(send, press, fsm(1))
-    assert mode_msg.text == "📆 Каждый месяц\n\nКак напоминать каждый месяц?"
+    state = fsm(1)
+    content = await flow_to_content(send, press, state, "monthly")
+    mode_msg = content.answered[-1]
+    assert step_text(content) == "📆 Каждый месяц\n\nКак напоминать каждый месяц?"
+    assert shows_cancel(content.answered)
     assert inline_datas(markup_of(mode_msg)) == ["monthmode_days", "monthmode_last", "monthmode_before"]
     assert inline_texts(markup_of(mode_msg)) == [
         "📅 В указанные дни месяца", "📆 В последний день месяца", "⏳ За N дней до конца месяца"
@@ -321,7 +333,7 @@ async def test_month_days_flow(send, press, fsm, main_module):
     await press(FakeCallback("monthmode_days", mode_msg), state)
     days_msg = mode_msg.answered[-1]
 
-    assert days_msg.text == (
+    assert step_text(mode_msg) == (
         "📆 Каждый месяц\n\nВыберите дни месяца.\nМожно выбрать несколько дней.\n"
         "Когда закончите — нажмите «Подтвердить выбор».\n\n"
         "ℹ️ Если выбранный день отсутствует в месяце (например, 29 или 30), "
@@ -437,7 +449,8 @@ async def test_once_flow(send, press, fsm, main_module):
     state = fsm(1)
     content = await flow_to_content(send, press, state, "once", text="к ортопеду с Андреем")
     calendar_msg = content.answered[-1]
-    assert calendar_msg.text == "🗓 Однократно\n\nВыберите дату:"
+    assert step_text(content) == "🗓 Однократно\n\nВыберите дату:"
+    assert shows_cancel(content.answered)
     assert any(d.startswith("date_") for d in inline_datas(markup_of(calendar_msg)))
 
     day = tomorrow_utc()
@@ -482,8 +495,8 @@ async def test_weekly_flow(send, press, fsm, main_module):
     state = fsm(1)
     content = await flow_to_content(send, press, state, "weekly", text="спортзал")
     days_msg = content.answered[-1]
-    assert days_msg.text == ("📆 Каждую неделю\n\nВыберите дни недели.\nМожно выбрать несколько дней.\n"
-                             "Когда закончите — нажмите «Подтвердить выбор».")
+    assert step_text(content) == ("📆 Каждую неделю\n\nВыберите дни недели.\nМожно выбрать несколько дней.\n"
+                                  "Когда закончите — нажмите «Подтвердить выбор».")
     assert inline_texts(markup_of(days_msg))[-1] == "✔ Подтвердить выбор"
 
     for data in ["weekday_wed", "weekday_mon", "weekday_done"]:
@@ -675,3 +688,164 @@ async def test_geo_timezone_is_saved(send, press, fsm):
     assert any(b.request_location for b in buttons)
     await send(FakeMessage(1, location=SimpleNamespace(latitude=55.75, longitude=37.62)), state)
     assert await storage.get_user_timezone(1) == "Europe/Moscow"
+
+
+# ---------- После выбора вопросы и кнопки исчезают ----------
+
+def bot_messages(*user_or_bot_msgs):
+    """Все сообщения бота, порождённые этими сообщениями (рекурсивно: ответы на ответы)."""
+    out, stack = [], list(user_or_bot_msgs)
+    while stack:
+        m = stack.pop()
+        for reply in m.answered:
+            out.append(reply)
+            stack.append(reply)
+    return out
+
+
+async def run_flow(send, press, state, repeat):
+    """Пройти весь сценарий. Возвращает (сообщения пользователя, подтверждение)."""
+    start = await open_menu(send, state)
+    await choose_type(press, state, start.answered[-1], repeat)
+    content = await say(send, state, "купить хлеб")
+    users = [start, content]
+    step = content.answered[-1]
+    day = tomorrow_utc()
+    if repeat == "once":
+        await press(FakeCallback(f"date_1_{day.year}_{day.month}_{day.day}", step), state)
+    elif repeat == "hourly":
+        n = await say(send, state, "3")
+        users.append(n)
+        await press(FakeCallback("start_now", n.answered[-1]), state)
+        return users, n.answered[-1].answered[-1]
+    elif repeat == "daily":
+        n = await say(send, state, "2")
+        users.append(n)
+        await press(FakeCallback(f"date_1_{day.year}_{day.month}_{day.day}", n.answered[-1]), state)
+    elif repeat == "weekly":
+        for data in ["weekday_mon", "weekday_done"]:
+            await press(FakeCallback(data, step), state)
+    else:  # monthly
+        await press(FakeCallback("monthmode_days", step), state)
+        days_msg = step.answered[-1]
+        for data in ["mday_10", "mday_done"]:
+            await press(FakeCallback(data, days_msg), state)
+    t = await say(send, state, "1000")
+    users.append(t)
+    return users, t.answered[-1]
+
+
+@pytest.mark.parametrize("repeat", ["once", "hourly", "daily", "weekly", "monthly"])
+async def test_only_confirmation_stays_after_flow(send, press, fsm, bot, repeat):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    users, confirmation = await run_flow(send, press, state, repeat)
+
+    assert "✅ Напоминание установлено" in confirmation.text
+    questions = [m for m in bot_messages(*users) if m is not confirmation]
+    assert questions
+    assert {m.message_id for m in questions} <= deleted_ids(bot)
+    assert confirmation.message_id not in deleted_ids(bot)
+    assert not {m.message_id for m in users} & deleted_ids(bot)  # сообщения пользователя не трогаем
+
+
+async def test_previous_question_disappears_right_after_choice(send, press, fsm, bot):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    start = await open_menu(send, state)
+    menu_msgs = list(start.answered)
+    await choose_type(press, state, start.answered[-1], "once")
+    assert {m.message_id for m in menu_msgs} <= deleted_ids(bot)  # меню типов исчезло
+
+    content = await say(send, state, "x")
+    text_prompt = start.answered[-1].answered[-1]
+    assert text_prompt.message_id in deleted_ids(bot)  # «Отправьте текст…» исчезло
+    assert not {m.message_id for m in content.answered} & deleted_ids(bot)  # текущий шаг на месте
+
+
+async def test_every_step_keeps_cancel_keyboard(send, press, fsm):
+    """Старые сообщения удаляются вместе со своей клавиатурой, поэтому каждый шаг присылает «❌ Отмена» заново."""
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    start = await open_menu(send, state)
+    assert shows_cancel(start.answered)
+    await choose_type(press, state, start.answered[-1], "monthly")
+    assert shows_cancel(start.answered[-1].answered)
+    content = await say(send, state, "x")
+    assert shows_cancel(content.answered)
+    await press(FakeCallback("monthmode_days", content.answered[-1]), state)
+    assert shows_cancel(content.answered[-1].answered)
+
+
+async def test_cancel_removes_questions(send, press, fsm, bot):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    start = await open_menu(send, state)
+    await choose_type(press, state, start.answered[-1], "once")
+    content = await say(send, state, "x")
+    cancel = await say(send, state, CANCEL)
+
+    questions = bot_messages(start, content)
+    assert {m.message_id for m in questions} <= deleted_ids(bot)
+    assert cancel.answered[-1].message_id not in deleted_ids(bot)
+
+
+async def test_hints_and_errors_disappear_too(send, press, fsm, bot):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    content = await flow_to_content(send, press, state, "once")
+    hint = await say(send, state, "завтра")          # текст вместо кнопки
+    day = tomorrow_utc()
+    await press(FakeCallback(f"date_1_{day.year}_{day.month}_{day.day}", content.answered[-1]), state)
+    error = await say(send, state, "abc")            # неверное время
+    await say(send, state, "1000")
+
+    assert hint.answered[-1].message_id in deleted_ids(bot)
+    assert error.answered[-1].message_id in deleted_ids(bot)
+
+
+async def test_restart_removes_questions_of_abandoned_flow(send, press, fsm, bot):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    content = await flow_to_content(send, press, state, "weekly")
+    old_questions = list(content.answered)
+    again = await open_menu(send, state)
+    assert {m.message_id for m in old_questions} <= deleted_ids(bot)
+    assert not {m.message_id for m in again.answered} & deleted_ids(bot)
+
+
+async def test_timezone_questions_disappear(send, press, fsm, bot):
+    await storage.get_or_create_user(1)
+    state = fsm(1)
+    choice = FakeMessage(1, text="👋 Привет! Укажите часовой пояс")
+    await press(FakeCallback("tz_manual", choice), state)
+    bad = await say(send, state, "Mars/Olympus")
+    good = await say(send, state, "Europe/Moscow")
+    assert {choice.message_id, bad.answered[-1].message_id} <= deleted_ids(bot)
+    assert good.answered[-1].message_id not in deleted_ids(bot)
+
+
+async def test_geo_questions_disappear(send, press, fsm, bot):
+    await storage.get_or_create_user(1)
+    state = fsm(1)
+    choice = FakeMessage(1, text="👋 Привет! Укажите часовой пояс")
+    await press(FakeCallback("tz_geo", choice), state)
+    geo_prompt = choice.answered[-1]
+    assert choice.message_id in deleted_ids(bot)  # кнопки выбора способа исчезли
+    done = await say(send, state, location=SimpleNamespace(latitude=55.75, longitude=37.62))
+    assert geo_prompt.message_id in deleted_ids(bot)
+    assert done.answered[-1].message_id not in deleted_ids(bot)
+
+
+async def test_failed_delete_does_not_break_flow(send, press, fsm, bot):
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import DeleteMessages
+
+    async def cannot_delete(chat_id, message_ids, **kwargs):
+        raise TelegramBadRequest(method=DeleteMessages(chat_id=chat_id, message_ids=message_ids),
+                                 message="Bad Request: message can't be deleted")
+
+    bot.delete_messages = cannot_delete
+    await make_user(1, tz="UTC")
+    _, confirmation = await run_flow(send, press, fsm(1), "once")
+    assert "✅ Напоминание установлено" in confirmation.text
