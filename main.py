@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -39,7 +39,7 @@ from keyboards import (
     get_cancel_keyboard,
     get_month_mode_keyboard,
     get_month_days_keyboard,
-    get_reminders_list_keyboard,
+    get_reminder_actions_inline,
 )
 from scheduler import create_scheduler, next_monthly_run
 from texts import (
@@ -52,7 +52,6 @@ from texts import (
     format_duration,
     month_note,
     order_weekdays,
-    plural,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -219,42 +218,23 @@ def format_reminder(index: int, reminder: dict, tz: ZoneInfo) -> str:
 
 
 NO_REMINDERS = "📭 Нет активных напоминаний.\n\nСоздайте новое!"
-LIST_LIMIT = 3800  # лимит Telegram на сообщение — 4096 символов, оставляем запас на разметку
-
-
-async def render_reminders_list(chat_id: int) -> list[tuple[str, list[int]]]:
-    """Список напоминаний: [(текст сообщения, id напоминаний в нём)].
-    Обычно это одно сообщение; на второе переходит, только если не влезает в лимит Telegram."""
-    reminders = await get_user_reminders(chat_id)
-    if not reminders:
-        return []
-    user_tz = await get_user_timezone(chat_id)
-    tz = ZoneInfo(user_tz) if user_tz else UTC
-
-    n = len(reminders)
-    header = (f"📋 У вас {n} {plural(n, 'активное напоминание', 'активных напоминания', 'активных напоминаний')}."
-              "\nЧтобы отменить, нажмите его номер внизу.")
-    pages, text, ids = [], header, []
-    for i, reminder in enumerate(reminders, 1):
-        block = format_reminder(i, reminder, tz)
-        if ids and len(text) + len(block) + 2 > LIST_LIMIT:
-            pages.append((text, ids))
-            text, ids = "", []
-        text = f"{text}\n\n{block}" if text else block
-        ids.append(reminder['id'])
-    pages.append((text, ids))
-    return pages
 
 
 async def send_reminders_list(message: Message):
-    pages = await render_reminders_list(message.chat.id)
-    if not pages:
+    """Каждое напоминание — отдельным сообщением со своей кнопкой отмены."""
+    reminders = await get_user_reminders(message.chat.id)
+    if not reminders:
         await message.answer(NO_REMINDERS)
         return
-    number = 1  # номера на кнопках совпадают с номерами в тексте и на следующих страницах
-    for text, ids in pages:
-        await message.answer(text, parse_mode="HTML", reply_markup=get_reminders_list_keyboard(ids, number))
-        number += len(ids)
+
+    user_tz = await get_user_timezone(message.chat.id)
+    tz = ZoneInfo(user_tz) if user_tz else UTC
+    for i, reminder in enumerate(reminders, 1):
+        await message.answer(
+            format_reminder(i, reminder, tz),
+            parse_mode="HTML",
+            reply_markup=get_reminder_actions_inline(reminder['id'], reminder.get('repeat_type', 'once'))
+        )
 
 
 async def send_settings(message: Message):
@@ -266,7 +246,16 @@ async def send_settings(message: Message):
 
 # ---------- Шаги диалога ----------
 # Каждый шаг — одно сообщение: «[уже выбранное правило]» → «что сделать сейчас».
-# «❌ Отмена» — на нижней клавиатуре или (на шагах с кнопками) последней кнопкой в сообщении.
+# «❌ Отмена» всегда на нижней клавиатуре.
+#
+# Как Telegram показывает нижнюю клавиатуру: её задаёт последнее сообщение бота с клавиатурой,
+# и если это сообщение удалить — клавиатура пропадает. А в одном сообщении может быть либо
+# нижняя клавиатура, либо кнопки в сообщении. Поэтому на время диалога бот держит «шапку» —
+# сообщение «🆕 Новое напоминание» с клавиатурой «❌ Отмена». Шаги с кнопками в сообщении
+# (меню, календарь, дни недели, дни месяца) приходят одним сообщением, а «❌ Отмена» под ними — от шапки.
+# Шаги со своей клавиатурой (числа, время) несут её сами, «❌ Отмена» в ней последней строкой.
+# Шапка удаляется вместе с остальными вопросами, когда напоминание создано или отменено.
+HEADER = "🆕 Новое напоминание"
 
 async def remember_prompt(state: FSMContext, *messages: Message):
     """Запомнить вопросы бота, чтобы убрать их, когда пользователь ответит."""
@@ -275,10 +264,10 @@ async def remember_prompt(state: FSMContext, *messages: Message):
     await state.update_data(prompt_ids=list(dict.fromkeys(ids)))
 
 
-async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext, keep=()):
-    """Удалить запомненные вопросы бота (кроме keep). Если сообщение уже не удалить — не страшно."""
+async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext, keep_ids=()):
+    """Удалить запомненные вопросы бота (кроме keep_ids). Если сообщение уже не удалить — не страшно."""
     data = await state.get_data()
-    keep_ids = [m.message_id for m in keep]
+    keep_ids = list(keep_ids)
     old = [i for i in data.get('prompt_ids', []) if i not in keep_ids]
     if old:
         try:
@@ -290,15 +279,34 @@ async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext, keep=()):
 
 async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str, *,
                     inline=None, keyboard=None):
-    """Отправить шаг диалога одним сообщением и убрать вопросы предыдущего шага.
+    """Отправить шаг диалога и убрать вопросы предыдущего шага.
 
-    inline — кнопки в сообщении (в них уже есть «❌ Отмена»); иначе нижняя клавиатура keyboard,
-    по умолчанию только «❌ Отмена». В одном сообщении Telegram — что-то одно из двух.
+    inline — кнопки в сообщении; keyboard — своя нижняя клавиатура шага (числа, время);
+    без них шаг просто текстом, а внизу остаётся «❌ Отмена».
     """
-    sent = await message.answer(f"{rule}\n\n{instruction}",
-                                reply_markup=inline or keyboard or get_cancel_keyboard())
-    await delete_prompts(bot, message.chat.id, state)
-    await remember_prompt(state, sent)
+    data = await state.get_data()
+    header_id = data.get('header_id')
+    keyboard_from_header = header_id is not None and data.get('keyboard_from') == header_id
+    text = f"{rule}\n\n{instruction}" if rule else instruction
+    sent = []
+
+    if keyboard is not None:
+        step = await message.answer(text, reply_markup=keyboard)
+        keyboard_from = step.message_id
+    else:
+        if not keyboard_from_header:
+            # Внизу сейчас другая клавиатура (главное меню, числа) — нужна шапка с «❌ Отмена»
+            header = await message.answer(HEADER, reply_markup=get_cancel_keyboard())
+            sent.append(header)
+            header_id = keyboard_from = header.message_id
+        else:
+            keyboard_from = header_id
+        step = await message.answer(text, reply_markup=inline)
+    sent.append(step)
+
+    await delete_prompts(bot, message.chat.id, state, keep_ids=[header_id] if header_id else [])
+    await remember_prompt(state, *sent)
+    await state.update_data(header_id=header_id, keyboard_from=keyboard_from)
 
 
 async def say_in_step(message: Message, state: FSMContext, text: str):
@@ -330,12 +338,13 @@ async def start_new_reminder(message: Message, state: FSMContext, bot: Bot, cont
     # Если прошлый диалог бросили на середине — его выбор не нужен, а вопросы уберём
     old_prompts = (await state.get_data()).get('prompt_ids', [])
     await state.set_data({'prompt_ids': old_prompts})
-    rule = "🆕 Новое напоминание"
     if content:
         content_type, file_id, text = content
         await state.update_data(content_type=content_type, file_id=file_id, text=text)
-        rule = describe_content(content_type, text)
-    await show_step(message, state, bot, rule, "Выберите тип повторения:", inline=get_repeat_type_keyboard())
+        await show_step(message, state, bot, describe_content(content_type, text), "Выберите тип повторения:",
+                        inline=get_repeat_type_keyboard())
+    else:
+        await show_step(message, state, bot, "", "Выберите тип повторения:", inline=get_repeat_type_keyboard())
     await state.set_state(ReminderFlow.waiting_for_repeat_type)
 
 
@@ -817,26 +826,25 @@ async def cmd_list(message: Message):
 
 # ---------- Кнопки у напоминаний ----------
 
-# «❌ №N» под списком: отменить и обновить тот же список
+# «❌ №N» под общим списком из прошлой версии бота: отменить и убрать эту кнопку
 @router.callback_query(F.data.startswith("lcancel_"))
 async def list_cancel_reminder(callback: CallbackQuery):
     reminder_id = parse_id(callback.data.removeprefix("lcancel_"))
-    reminder = await get_own_reminder(reminder_id, callback.message.chat.id)
-    if not reminder:
+    if not await get_own_reminder(reminder_id, callback.message.chat.id):
         await callback.answer(NOT_FOUND, show_alert=True)
         return
 
     await update_reminder_status(reminder_id, 'canceled')
-    pages = await render_reminders_list(callback.message.chat.id)
-    if pages:
-        text, ids = pages[0]
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_reminders_list_keyboard(ids))
-    else:
-        await callback.message.edit_text(NO_REMINDERS, reply_markup=None)
+    markup = getattr(callback.message, 'reply_markup', None)
+    if markup is not None:
+        rows = [[b for b in row if b.callback_data != callback.data] for row in markup.inline_keyboard]
+        rows = [row for row in rows if row]
+        await callback.message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
     await callback.answer("✅ Напоминание отменено")
 
 
-# Обработчик отмены одного напоминания (из списков старой версии)
+# Обработчик отмены одного напоминания (из списка)# Обработчик отмены одного напоминания (из списков старой версии)
 @router.callback_query(F.data.startswith("cancel_reminder_"))
 async def cancel_single_reminder(callback: CallbackQuery):
     reminder_id = parse_id(callback.data.removeprefix("cancel_reminder_"))
