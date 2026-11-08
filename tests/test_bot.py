@@ -70,7 +70,7 @@ async def test_all_three_list_entry_points_render_the_same(send, press, fsm, mai
     cb = FakeCallback("my_reminders", cb_msg)
     await press(cb, fsm(1))
 
-    assert len(by_button.sent) == 3
+    assert len(by_button.sent) == 1  # весь список — одно сообщение
     assert by_button.sent == by_command.sent == cb_msg.sent
     assert cb.answers  # callback spinner is stopped
 
@@ -378,3 +378,82 @@ async def test_calendar_navigation_keeps_today_mark(press, fsm, main_module):
     await press(FakeCallback(f"cal_1_{today.year}_{today.month}", msg), state)
     markup = next(kw["reply_markup"] for kind, _, kw in msg.sent if kind == "edit_reply_markup")
     assert marked_days(markup) == [(today.year, today.month, today.day)]
+
+
+
+# ---------- Список напоминаний одним сообщением ----------
+
+async def make_list(owner_chat=1, count=2):
+    uid = await make_user(owner_chat)
+    ids = []
+    for i in range(count):
+        ids.append(await storage.create_reminder(
+            uid, datetime.now(timezone.utc) + timedelta(days=i + 1), f"дело {i + 1}"))
+    return ids
+
+
+def inline_of(kwargs):
+    return [b.callback_data for row in kwargs["reply_markup"].inline_keyboard for b in row]
+
+
+async def test_list_is_one_message_with_cancel_buttons(send, fsm):
+    ids = await make_list(count=3)
+    msg = FakeMessage(1, text="📋 Мои напоминания")
+    await send(msg, fsm(1))
+
+    assert len(msg.sent) == 1
+    _, text, kwargs = msg.sent[0]
+    assert "У вас 3 активных напоминания" in text
+    assert text.index("дело 1") < text.index("дело 2") < text.index("дело 3")
+    assert inline_of(kwargs) == [f"lcancel_{i}" for i in ids]
+
+
+async def test_list_cancel_updates_same_message(send, press, fsm):
+    ids = await make_list(count=2)
+    list_msg = FakeMessage(1, text="📋 У вас 2 активных напоминания")
+    cb = FakeCallback(f"lcancel_{ids[0]}", list_msg)
+    await press(cb, fsm(1))
+
+    assert (await storage.get_reminder_by_id(ids[0]))["status"] == "canceled"
+    kind, text, kwargs = list_msg.sent[-1]
+    assert kind == "edit_text"
+    assert "дело 1" not in text and "дело 2" in text
+    assert inline_of(kwargs) == [f"lcancel_{ids[1]}"]
+    assert list_msg.answered == []  # новых сообщений нет
+    assert cb.answers
+
+
+async def test_list_cancel_last_one_shows_empty(send, press, fsm):
+    ids = await make_list(count=1)
+    list_msg = FakeMessage(1, text="📋 …")
+    await press(FakeCallback(f"lcancel_{ids[0]}", list_msg), fsm(1))
+    kind, text, kwargs = list_msg.sent[-1]
+    assert kind == "edit_text" and "Нет активных напоминаний" in text
+    assert kwargs.get("reply_markup") is None
+
+
+async def test_list_cancel_someone_elses_reminder_is_refused(press, fsm):
+    ids = await make_list(owner_chat=1, count=1)
+    await make_user(2)
+    stranger_msg = FakeMessage(2, text="📋 …")
+    cb = FakeCallback(f"lcancel_{ids[0]}", stranger_msg)
+    await press(cb, fsm(2))
+    assert (await storage.get_reminder_by_id(ids[0]))["status"] == "pending"
+    assert cb.answers[-1][1] is True
+    assert stranger_msg.sent == []
+
+
+async def test_very_long_list_continues_numbering_on_next_message(send, fsm):
+    uid = await make_user(1)
+    ids = [await storage.create_reminder(uid, datetime.now(timezone.utc) + timedelta(days=i + 1), "я" * 1500)
+           for i in range(3)]
+    msg = FakeMessage(1, text="📋 Мои напоминания")
+    await send(msg, fsm(1))
+
+    assert len(msg.sent) == 2  # не влезло в лимит Telegram — второе сообщение
+    assert all(len(text) <= 4096 for _, text, _ in msg.sent)
+    buttons = [[(b.text, b.callback_data) for row in kw["reply_markup"].inline_keyboard for b in row]
+               for _, _, kw in msg.sent]
+    assert buttons == [[("❌ №1", f"lcancel_{ids[0]}"), ("❌ №2", f"lcancel_{ids[1]}")],
+                       [("❌ №3", f"lcancel_{ids[2]}")]]
+    assert "Напоминание #3" in msg.sent[1][1]

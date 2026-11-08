@@ -35,20 +35,20 @@ def flow_state(main_module, name):
 KEYBOARD_CASES = [
     # (как построить клавиатуру, шаг диалога, допустимые обработчики)
     (lambda: kb.get_timezone_geo_or_manual(), None, {"tz_geo_request", "tz_manual"}),
-    (lambda: kb.get_repeat_type_keyboard(), "waiting_for_repeat_type", {"repeat_type_selected"}),
-    (lambda: kb.get_weekdays_keyboard(), "waiting_for_weekdays", {"weekday_toggle"}),
-    (lambda: kb.get_weekdays_keyboard({"mon", "sun"}), "waiting_for_weekdays", {"weekday_toggle"}),
+    (lambda: kb.get_repeat_type_keyboard(), "waiting_for_repeat_type", {"repeat_type_selected", "cancel_flow_button"}),
+    (lambda: kb.get_weekdays_keyboard(), "waiting_for_weekdays", {"weekday_toggle", "cancel_flow_button"}),
+    (lambda: kb.get_weekdays_keyboard({"mon", "sun"}), "waiting_for_weekdays", {"weekday_toggle", "cancel_flow_button"}),
     (lambda: kb.get_calendar(2026, 11, -1001234567890), "waiting_for_date",
-     {"calendar_nav", "date_selected", "ignore_callback"}),
+     {"calendar_nav", "date_selected", "ignore_callback", "cancel_flow_button"}),
     (lambda: kb.get_reminder_actions_inline(5, "once"), None, {"cancel_single_reminder"}),
     (lambda: kb.get_reminder_actions_inline(5, "daily"), None, {"cancel_series_reminder"}),
     (lambda: kb.get_snooze_keyboard(5, "once"), None, {"snooze_reminder", "done_reminder"}),
     (lambda: kb.get_snooze_keyboard(5, "weekly"), None,
      {"snooze_reminder", "done_reminder", "cancel_series_reminder"}),
-    (lambda: kb.get_month_mode_keyboard(), "waiting_for_month_mode", {"month_mode_selected"}),
-    (lambda: kb.get_month_days_keyboard(), "waiting_for_month_days", {"month_day_toggle"}),
-    (lambda: kb.get_month_days_keyboard({1, 31}), "waiting_for_month_days", {"month_day_toggle"}),
-    (lambda: kb.get_start_now_keyboard(), "waiting_for_time", {"start_now_selected"}),
+    (lambda: kb.get_month_mode_keyboard(), "waiting_for_month_mode", {"month_mode_selected", "cancel_flow_button"}),
+    (lambda: kb.get_month_days_keyboard(), "waiting_for_month_days", {"month_day_toggle", "cancel_flow_button"}),
+    (lambda: kb.get_month_days_keyboard({1, 31}), "waiting_for_month_days", {"month_day_toggle", "cancel_flow_button"}),
+    (lambda: kb.get_reminders_list_keyboard([5, 6, 7, 8]), None, {"list_cancel_reminder"}),
     (lambda: kb.get_reminder_list_keyboard(), None,
      {"new_reminder_callback", "my_reminders_callback", "settings_callback"}),
 ]
@@ -67,7 +67,7 @@ async def test_every_inline_button_reaches_its_handler(main_module, build, state
 async def test_repeat_type_keyboard_offers_all_types_one_per_row():
     markup = kb.get_repeat_type_keyboard()
     assert callbacks(markup) == [
-        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly"
+        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly", "cancel_flow"
     ]
     assert all(len(row) == 1 for row in markup.inline_keyboard)
 
@@ -87,7 +87,7 @@ async def test_interval_keyboard_is_reply_keyboard_with_numbers_and_cancel(kind)
 async def test_weekdays_keyboard_has_all_days_done_and_marks_selected():
     datas = callbacks(kb.get_weekdays_keyboard())
     assert set(datas) == {f"weekday_{d}" for d in
-                          ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]} | {"weekday_done"}
+                          ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]} | {"weekday_done", "cancel_flow"}
 
     def text_of(markup, data):
         return next(b.text for b in inline_buttons(markup) if b.callback_data == data)
@@ -192,3 +192,24 @@ async def test_calendar_other_month_has_no_mark():
 async def test_calendar_without_today_has_no_mark():
     texts = day_button_texts(kb.get_calendar(2026, 11, 7))
     assert all(texts[d] == str(d) for d in texts)
+
+
+
+async def test_time_keyboard_with_start_now_button():
+    rows = [[b.text for b in row] for row in kb.get_time_keyboard(start_now=True).keyboard]
+    assert rows[0] == ["📍 С текущего момента"]
+    assert rows[-1] == ["❌ Отмена"]
+    assert [t for row in rows[1:-1] for t in row] == [f"{h:02d}:00" for h in range(8, 24)]
+
+
+async def test_flow_inline_keyboards_end_with_cancel():
+    for markup in [kb.get_repeat_type_keyboard(), kb.get_weekdays_keyboard(), kb.get_month_mode_keyboard(),
+                   kb.get_month_days_keyboard(), kb.get_calendar(2026, 11, 7)]:
+        last_row = markup.inline_keyboard[-1]
+        assert [(b.text, b.callback_data) for b in last_row] == [("❌ Отмена", "cancel_flow")]
+
+
+async def test_reminders_list_keyboard_numbers_buttons():
+    markup = kb.get_reminders_list_keyboard([11, 12, 13, 14])
+    buttons = [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row]
+    assert buttons == [("❌ №1", "lcancel_11"), ("❌ №2", "lcancel_12"), ("❌ №3", "lcancel_13"), ("❌ №4", "lcancel_14")]

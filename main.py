@@ -26,6 +26,8 @@ from storage import (
 )
 from keyboards import (
     BTN_CANCEL,
+    BTN_START_NOW,
+    CANCEL_DATA,
     get_timezone_geo_or_manual,
     get_timezone_geo_button,
     get_time_keyboard,
@@ -37,8 +39,7 @@ from keyboards import (
     get_cancel_keyboard,
     get_month_mode_keyboard,
     get_month_days_keyboard,
-    get_start_now_keyboard,
-    get_reminder_actions_inline,
+    get_reminders_list_keyboard,
 )
 from scheduler import create_scheduler, next_monthly_run
 from texts import (
@@ -51,6 +52,7 @@ from texts import (
     format_duration,
     month_note,
     order_weekdays,
+    plural,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -216,23 +218,43 @@ def format_reminder(index: int, reminder: dict, tz: ZoneInfo) -> str:
     )
 
 
-async def send_reminders_list(message: Message):
-    reminders = await get_user_reminders(message.chat.id)
-    if not reminders:
-        await message.answer("📭 Нет активных напоминаний.\n\nСоздайте новое!")
-        return
+NO_REMINDERS = "📭 Нет активных напоминаний.\n\nСоздайте новое!"
+LIST_LIMIT = 3800  # лимит Telegram на сообщение — 4096 символов, оставляем запас на разметку
 
-    user_tz = await get_user_timezone(message.chat.id)
+
+async def render_reminders_list(chat_id: int) -> list[tuple[str, list[int]]]:
+    """Список напоминаний: [(текст сообщения, id напоминаний в нём)].
+    Обычно это одно сообщение; на второе переходит, только если не влезает в лимит Telegram."""
+    reminders = await get_user_reminders(chat_id)
+    if not reminders:
+        return []
+    user_tz = await get_user_timezone(chat_id)
     tz = ZoneInfo(user_tz) if user_tz else UTC
 
-    await message.answer(f"📋 У вас {len(reminders)} активных напоминаний:\n")
-
+    n = len(reminders)
+    header = (f"📋 У вас {n} {plural(n, 'активное напоминание', 'активных напоминания', 'активных напоминаний')}."
+              "\nЧтобы отменить, нажмите его номер внизу.")
+    pages, text, ids = [], header, []
     for i, reminder in enumerate(reminders, 1):
-        await message.answer(
-            format_reminder(i, reminder, tz),
-            parse_mode="HTML",
-            reply_markup=get_reminder_actions_inline(reminder['id'], reminder.get('repeat_type', 'once'))
-        )
+        block = format_reminder(i, reminder, tz)
+        if ids and len(text) + len(block) + 2 > LIST_LIMIT:
+            pages.append((text, ids))
+            text, ids = "", []
+        text = f"{text}\n\n{block}" if text else block
+        ids.append(reminder['id'])
+    pages.append((text, ids))
+    return pages
+
+
+async def send_reminders_list(message: Message):
+    pages = await render_reminders_list(message.chat.id)
+    if not pages:
+        await message.answer(NO_REMINDERS)
+        return
+    number = 1  # номера на кнопках совпадают с номерами в тексте и на следующих страницах
+    for text, ids in pages:
+        await message.answer(text, parse_mode="HTML", reply_markup=get_reminders_list_keyboard(ids, number))
+        number += len(ids)
 
 
 async def send_settings(message: Message):
@@ -243,7 +265,8 @@ async def send_settings(message: Message):
 
 
 # ---------- Шаги диалога ----------
-# Каждый шаг: «[уже выбранное правило]» → «что сделать сейчас». «❌ Отмена» всегда в нижней клавиатуре.
+# Каждый шаг — одно сообщение: «[уже выбранное правило]» → «что сделать сейчас».
+# «❌ Отмена» — на нижней клавиатуре или (на шагах с кнопками) последней кнопкой в сообщении.
 
 async def remember_prompt(state: FSMContext, *messages: Message):
     """Запомнить вопросы бота, чтобы убрать их, когда пользователь ответит."""
@@ -267,21 +290,15 @@ async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext, keep=()):
 
 async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str, *,
                     inline=None, keyboard=None):
-    """Отправить шаг диалога и убрать вопросы предыдущего шага.
+    """Отправить шаг диалога одним сообщением и убрать вопросы предыдущего шага.
 
-    keyboard — нижняя клавиатура шага, по умолчанию только «❌ Отмена».
-    Telegram убирает нижнюю клавиатуру вместе с сообщением, которое её принесло, а в одном сообщении
-    может быть либо она, либо кнопки в сообщении. Поэтому шаг с кнопками — это два сообщения:
-    правило (с нижней клавиатурой) и задание (с кнопками).
+    inline — кнопки в сообщении (в них уже есть «❌ Отмена»); иначе нижняя клавиатура keyboard,
+    по умолчанию только «❌ Отмена». В одном сообщении Telegram — что-то одно из двух.
     """
-    markup = keyboard or get_cancel_keyboard()
-    if inline is None:
-        sent = [await message.answer(f"{rule}\n\n{instruction}", reply_markup=markup)]
-    else:
-        sent = [await message.answer(rule, reply_markup=markup),
-                await message.answer(instruction, reply_markup=inline)]
+    sent = await message.answer(f"{rule}\n\n{instruction}",
+                                reply_markup=inline or keyboard or get_cancel_keyboard())
     await delete_prompts(bot, message.chat.id, state)
-    await remember_prompt(state, *sent)
+    await remember_prompt(state, sent)
 
 
 async def say_in_step(message: Message, state: FSMContext, text: str):
@@ -290,8 +307,8 @@ async def say_in_step(message: Message, state: FSMContext, text: str):
 
 
 async def ask_time(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str = TIME_STEP,
-                   inline=None):
-    await show_step(message, state, bot, rule, instruction, inline=inline, keyboard=get_time_keyboard())
+                   start_now: bool = False):
+    await show_step(message, state, bot, rule, instruction, keyboard=get_time_keyboard(start_now=start_now))
     await state.set_state(ReminderFlow.waiting_for_time)
 
 
@@ -356,6 +373,17 @@ async def cancel_flow(message: Message, state: FSMContext, bot: Bot):
         reply_markup=get_main_menu_keyboard()
     )
     await delete_prompts(bot, message.chat.id, state)
+    await state.clear()
+
+
+@router.callback_query(F.data == CANCEL_DATA)
+async def cancel_flow_button(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """«❌ Отмена» кнопкой в сообщении."""
+    await callback.answer()
+    if await state.get_state() is not None:
+        await callback.message.answer("❌ Создание напоминания отменено.", reply_markup=get_main_menu_keyboard())
+    await remember_prompt(state, callback.message)  # старая кнопка из прошлого диалога тоже исчезнет
+    await delete_prompts(bot, callback.message.chat.id, state)
     await state.clear()
 
 
@@ -540,7 +568,7 @@ async def interval_input(message: Message, state: FSMContext, bot: Bot):
             message, state, bot, rule,
             "От какого момента начать отсчёт?\nМожно начать с текущего момента, выбрать время ниже "
             f"или ввести время вручную {TIME_EXAMPLE}.",
-            inline=get_start_now_keyboard(),
+            start_now=True,
         )
     else:
         await ask_calendar(message, state, bot, rule, "Выберите дату начала:")
@@ -676,15 +704,6 @@ async def date_selected(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await ask_time(callback.message, state, bot, rule)
 
 
-@router.callback_query(ReminderFlow.waiting_for_time, F.data == "start_now")
-async def start_now_selected(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    """«📍 С текущего момента» для «Каждые N часов»."""
-    await callback.answer()
-    if (await state.get_data()).get('repeat_type') != 'hourly':
-        return
-    await finalize_reminder(callback.message, state, bot, start_now=True)
-
-
 # Кнопка шага создания нажата вне диалога (старое сообщение или бот перезапускался)
 @router.callback_query(F.data.startswith(FLOW_BUTTON_PREFIXES))
 async def stale_flow_button(callback: CallbackQuery):
@@ -694,6 +713,15 @@ async def stale_flow_button(callback: CallbackQuery):
 @router.message(StateFilter(*BUTTON_STEPS))
 async def typed_on_button_step(message: Message, state: FSMContext):
     await say_in_step(message, state, BUTTONS_HINT)
+
+
+@router.message(ReminderFlow.waiting_for_time, F.text == BTN_START_NOW)
+async def start_now_selected(message: Message, state: FSMContext, bot: Bot):
+    """«📍 С текущего момента» для «Каждые N часов»."""
+    if (await state.get_data()).get('repeat_type') != 'hourly':
+        await say_in_step(message, state, f"❌ Выберите время ниже или введите вручную {TIME_EXAMPLE}.")
+        return
+    await finalize_reminder(message, state, bot, start_now=True)
 
 
 @router.message(ReminderFlow.waiting_for_time)
@@ -789,7 +817,26 @@ async def cmd_list(message: Message):
 
 # ---------- Кнопки у напоминаний ----------
 
-# Обработчик отмены одного напоминания (из списка)
+# «❌ №N» под списком: отменить и обновить тот же список
+@router.callback_query(F.data.startswith("lcancel_"))
+async def list_cancel_reminder(callback: CallbackQuery):
+    reminder_id = parse_id(callback.data.removeprefix("lcancel_"))
+    reminder = await get_own_reminder(reminder_id, callback.message.chat.id)
+    if not reminder:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+
+    await update_reminder_status(reminder_id, 'canceled')
+    pages = await render_reminders_list(callback.message.chat.id)
+    if pages:
+        text, ids = pages[0]
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_reminders_list_keyboard(ids))
+    else:
+        await callback.message.edit_text(NO_REMINDERS, reply_markup=None)
+    await callback.answer("✅ Напоминание отменено")
+
+
+# Обработчик отмены одного напоминания (из списков старой версии)
 @router.callback_query(F.data.startswith("cancel_reminder_"))
 async def cancel_single_reminder(callback: CallbackQuery):
     reminder_id = parse_id(callback.data.removeprefix("cancel_reminder_"))

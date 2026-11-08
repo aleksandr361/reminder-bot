@@ -18,6 +18,9 @@ BTN_SETTINGS = "⚙️ Настройки"
 # Во время создания напоминания эта кнопка всегда внизу
 BTN_CANCEL = "❌ Отмена"
 BTN_CONFIRM = "✔ Подтвердить выбор"
+BTN_START_NOW = "📍 С текущего момента"
+# «❌ Отмена» в кнопках сообщения — для шагов, где ответ даётся кнопками
+CANCEL_DATA = "cancel_flow"
 
 WEEKDAYS = [
     ("mon", "Пн"), ("tue", "Вт"), ("wed", "Ср"), ("thu", "Чт"),
@@ -47,6 +50,11 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
 
 def _inline(rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[list(r) for r in rows])
+
+
+def _with_cancel(rows) -> InlineKeyboardMarkup:
+    """Кнопки шага и «❌ Отмена» последней строкой — всё в одном сообщении."""
+    return _inline(list(rows) + [[_btn(BTN_CANCEL, CANCEL_DATA)]])
 
 
 def _chunks(items, size):
@@ -93,7 +101,7 @@ def get_cancel_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_repeat_type_keyboard() -> InlineKeyboardMarkup:
-    return _inline([
+    return _with_cancel([
         [_btn("🗓 Однократно", "repeat_once")],
         [_btn("🔁 Каждые N часов", "repeat_hourly")],
         [_btn("🔁 Каждые N дней", "repeat_daily")],
@@ -114,11 +122,11 @@ def get_weekdays_keyboard(selected=None) -> InlineKeyboardMarkup:
         _btn(f"✅ {name}" if code in selected else name, f"weekday_{code}")
         for code, name in WEEKDAYS
     ]
-    return _inline([buttons[:4], buttons[4:], [_btn(BTN_CONFIRM, "weekday_done")]])
+    return _with_cancel([buttons[:4], buttons[4:], [_btn(BTN_CONFIRM, "weekday_done")]])
 
 
 def get_month_mode_keyboard() -> InlineKeyboardMarkup:
-    return _inline([
+    return _with_cancel([
         [_btn("📅 В указанные дни месяца", "monthmode_days")],
         [_btn("📆 В последний день месяца", "monthmode_last")],
         [_btn("⏳ За N дней до конца месяца", "monthmode_before")],
@@ -129,16 +137,16 @@ def get_month_days_keyboard(selected=None) -> InlineKeyboardMarkup:
     """Числа 1–31 (можно выбрать несколько) и «Подтвердить выбор»."""
     selected = set(selected or ())
     buttons = [_btn(f"✅{d}" if d in selected else str(d), f"mday_{d}") for d in range(1, 32)]
-    return _inline(_chunks(buttons, 7) + [[_btn(BTN_CONFIRM, "mday_done")]])
+    return _with_cancel(_chunks(buttons, 7) + [[_btn(BTN_CONFIRM, "mday_done")]])
 
 
-def get_start_now_keyboard() -> InlineKeyboardMarkup:
-    return _inline([[_btn("📍 С текущего момента", "start_now")]])
-
-
-def get_time_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура с часами вместо обычной. Своё время пользователь просто печатает (1015)."""
-    return _reply(TIME_PRESETS, TIME_COLUMNS, "Или введите время, например 1015")
+def get_time_keyboard(start_now: bool = False) -> ReplyKeyboardMarkup:
+    """Клавиатура с часами вместо обычной. Своё время пользователь просто печатает (1015).
+    start_now — первой строкой «📍 С текущего момента» (для «Каждые N часов»)."""
+    markup = _reply(TIME_PRESETS, TIME_COLUMNS, "Или введите время, например 1015")
+    if start_now:
+        markup.keyboard.insert(0, [KeyboardButton(text=BTN_START_NOW)])
+    return markup
 
 
 def get_calendar(year: int, month: int, chat_id, today: date | None = None) -> InlineKeyboardMarkup:
@@ -169,7 +177,7 @@ def get_calendar(year: int, month: int, chat_id, today: date | None = None) -> I
             _btn(day_text(day), f"date_{chat_id}_{year}_{month}_{day}") if day else _btn(" ", "ignore")
             for day in week
         ])
-    return _inline(rows)
+    return _with_cancel(rows)
 
 
 # ---------- Напоминания ----------
@@ -190,6 +198,12 @@ def get_snooze_keyboard(reminder_id: int, repeat_type: str = "once") -> InlineKe
     if repeat_type != "once":
         rows.append([_btn("❌ Отменить серию", f"cancel_series_{reminder_id}")])
     return _inline(rows)
+
+
+def get_reminders_list_keyboard(reminder_ids, first_number: int = 1) -> InlineKeyboardMarkup:
+    """Под списком напоминаний: «❌ №1», «❌ №2»… — отменить напоминание с этим номером."""
+    buttons = [_btn(f"❌ №{i}", f"lcancel_{rid}") for i, rid in enumerate(reminder_ids, first_number)]
+    return _inline(_chunks(buttons, 4))
 
 
 def get_reminder_list_keyboard() -> InlineKeyboardMarkup:

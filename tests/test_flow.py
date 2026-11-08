@@ -37,9 +37,14 @@ def markup_of(msg):
 
 
 def shows_cancel(messages):
-    """Среди ответов бота есть нижняя клавиатура с «❌ Отмена»."""
-    return any(isinstance(markup_of(m), ReplyKeyboardMarkup)
-               and [CANCEL] in reply_rows(markup_of(m)) for m in messages)
+    """Среди ответов бота есть «❌ Отмена» — кнопкой в сообщении или на нижней клавиатуре."""
+    for m in messages:
+        markup = markup_of(m)
+        if isinstance(markup, ReplyKeyboardMarkup) and [CANCEL] in reply_rows(markup):
+            return True
+        if isinstance(markup, InlineKeyboardMarkup) and "cancel_flow" in inline_datas(markup):
+            return True
+    return False
 
 
 def run_at_of_last():
@@ -102,13 +107,14 @@ async def test_menu_has_five_types_and_cancel_keyboard(send, fsm):
     await make_user(1, tz="UTC")
     start = await open_menu(send, fsm(1))
 
+    assert len(start.answered) == 1  # одно сообщение
     menu = start.answered[-1]
-    assert menu.text == "Выберите тип повторения:"
+    assert menu.text == "🆕 Новое напоминание\n\nВыберите тип повторения:"
     assert inline_datas(markup_of(menu)) == [
-        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly"
+        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly", "cancel_flow"
     ]
     assert inline_texts(markup_of(menu)) == [
-        "🗓 Однократно", "🔁 Каждые N часов", "🔁 Каждые N дней", "📆 Каждую неделю", "📆 Каждый месяц"
+        "🗓 Однократно", "🔁 Каждые N часов", "🔁 Каждые N дней", "📆 Каждую неделю", "📆 Каждый месяц", CANCEL
     ]
     assert all(len(row) == 1 for row in markup_of(menu).inline_keyboard)
     assert shows_cancel(start.answered)
@@ -192,10 +198,9 @@ async def test_hours_start_step(send, press, fsm):
     texts = "\n\n".join(m.text for m in n.answered)
     assert texts == ("🔁 Каждые 3 часа\n\nОт какого момента начать отсчёт?\n"
                      "Можно начать с текущего момента, выбрать время ниже или ввести время вручную (например: 1015).")
-    assert inline_datas(markup_of(n.answered[-1])) == ["start_now"]
-    assert inline_texts(markup_of(n.answered[-1])) == ["📍 С текущего момента"]
-    time_kb = next(markup_of(m) for m in n.answered if isinstance(markup_of(m), ReplyKeyboardMarkup))
-    assert reply_rows(time_kb) == [
+    assert len(n.answered) == 1
+    assert reply_rows(markup_of(n.answered[-1])) == [
+        ["📍 С текущего момента"],
         ["08:00", "09:00", "10:00", "11:00"], ["12:00", "13:00", "14:00", "15:00"],
         ["16:00", "17:00", "18:00", "19:00"], ["20:00", "21:00", "22:00", "23:00"], [CANCEL],
     ]
@@ -205,15 +210,15 @@ async def test_hours_start_now(send, press, fsm, main_module):
     await make_user(1, tz="UTC")
     state = fsm(1)
     await flow_to_content(send, press, state, "hourly", text="пить воду")
-    n = await say(send, state, "3")
+    await say(send, state, "3")
     before = datetime.now(UTC).replace(second=0, microsecond=0)
-    await press(FakeCallback("start_now", n.answered[-1]), state)
+    now_msg = await say(send, state, "📍 С текущего момента")
 
     run_at = await run_at_of_last()
     assert before + timedelta(hours=3) <= run_at <= before + timedelta(hours=3, minutes=1)
     rem = (await all_reminders())[-1]
     assert json.loads(rem["repeat_config"]) == {"every": 3}
-    final = n.answered[-1].answered[-1].text
+    final = now_msg.answered[-1].text
     local = run_at
     assert final == ("✅ Напоминание установлено\n\nпить воду\n🔁 Каждые 3 часа\n"
                      f"⏰ Следующее: {fmt(main_module, local.date())} в {local:%H:%M}")
@@ -308,9 +313,10 @@ async def test_month_mode_step(send, press, fsm):
     mode_msg = content.answered[-1]
     assert step_text(content) == "📆 Каждый месяц\n\nКак напоминать каждый месяц?"
     assert shows_cancel(content.answered)
-    assert inline_datas(markup_of(mode_msg)) == ["monthmode_days", "monthmode_last", "monthmode_before"]
+    assert len(content.answered) == 1
+    assert inline_datas(markup_of(mode_msg)) == ["monthmode_days", "monthmode_last", "monthmode_before", "cancel_flow"]
     assert inline_texts(markup_of(mode_msg)) == [
-        "📅 В указанные дни месяца", "📆 В последний день месяца", "⏳ За N дней до конца месяца"
+        "📅 В указанные дни месяца", "📆 В последний день месяца", "⏳ За N дней до конца месяца", CANCEL
     ]
 
 
@@ -340,8 +346,8 @@ async def test_month_days_flow(send, press, fsm, main_module):
         "напоминание придёт в последний день этого месяца."
     )
     datas = inline_datas(markup_of(days_msg))
-    assert datas == [f"mday_{d}" for d in range(1, 32)] + ["mday_done"]
-    assert inline_texts(markup_of(days_msg))[-1] == "✔ Подтвердить выбор"
+    assert datas == [f"mday_{d}" for d in range(1, 32)] + ["mday_done", "cancel_flow"]
+    assert inline_texts(markup_of(days_msg))[-2:] == ["✔ Подтвердить выбор", CANCEL]
 
     for data in ["mday_29", "mday_5", "mday_done"]:
         await press(FakeCallback(data, days_msg), state)
@@ -497,7 +503,7 @@ async def test_weekly_flow(send, press, fsm, main_module):
     days_msg = content.answered[-1]
     assert step_text(content) == ("📆 Каждую неделю\n\nВыберите дни недели.\nМожно выбрать несколько дней.\n"
                                   "Когда закончите — нажмите «Подтвердить выбор».")
-    assert inline_texts(markup_of(days_msg))[-1] == "✔ Подтвердить выбор"
+    assert inline_texts(markup_of(days_msg))[-2:] == ["✔ Подтвердить выбор", CANCEL]
 
     for data in ["weekday_wed", "weekday_mon", "weekday_done"]:
         await press(FakeCallback(data, days_msg), state)
@@ -519,15 +525,15 @@ async def test_text_outside_flow_starts_reminder(send, press, fsm, main_module):
     state = fsm(1)
     msg = await say(send, state, "Купить хлеб")
 
-    assert [m.text for m in msg.answered] == ["Купить хлеб", "Выберите тип повторения:"]
+    assert [m.text for m in msg.answered] == ["Купить хлеб\n\nВыберите тип повторения:"]
     assert shows_cancel(msg.answered)
     assert await state.get_state() == main_module.ReminderFlow.waiting_for_repeat_type.state
 
     # Текст уже есть — после выбора типа сразу следующий шаг
     prompt = await choose_type(press, state, msg.answered[-1], "hourly")
     assert prompt.text.startswith("🔁 Каждые N часов\n\nКак часто напоминать?")
-    n = await say(send, state, "2")
-    await press(FakeCallback("start_now", n.answered[-1]), state)
+    await say(send, state, "2")
+    await say(send, state, "📍 С текущего момента")
     rem = (await all_reminders())[-1]
     assert (rem["text"], rem["repeat_type"]) == ("Купить хлеб", "hourly")
 
@@ -595,10 +601,10 @@ async def test_other_attachments_become_reminders(send, press, fsm, kind, label)
     start = await open_menu(send, state)
     await choose_type(press, state, start.answered[-1], "hourly")
     await say(send, state, **{kind: SimpleNamespace(file_id=f"id-{kind}")})
-    n = await say(send, state, "1")
-    await press(FakeCallback("start_now", n.answered[-1]), state)
+    await say(send, state, "1")
+    done = await say(send, state, "📍 С текущего момента")
 
-    assert label in n.answered[-1].answered[-1].text
+    assert label in done.answered[-1].text
     rem = (await all_reminders())[-1]
     assert (rem["content_type"], rem["file_id"], rem["text"]) == (kind, f"id-{kind}", "")
 
@@ -609,8 +615,8 @@ async def test_gif_is_saved_as_animation_not_document(send, press, fsm):
     start = await open_menu(send, state)
     await choose_type(press, state, start.answered[-1], "hourly")
     await say(send, state, animation=SimpleNamespace(file_id="gif"), document=SimpleNamespace(file_id="gif-doc"))
-    n = await say(send, state, "1")
-    await press(FakeCallback("start_now", n.answered[-1]), state)
+    await say(send, state, "1")
+    await say(send, state, "📍 С текущего момента")
     assert (await all_reminders())[-1]["content_type"] == "animation"
 
 
@@ -715,9 +721,9 @@ async def run_flow(send, press, state, repeat):
         await press(FakeCallback(f"date_1_{day.year}_{day.month}_{day.day}", step), state)
     elif repeat == "hourly":
         n = await say(send, state, "3")
-        users.append(n)
-        await press(FakeCallback("start_now", n.answered[-1]), state)
-        return users, n.answered[-1].answered[-1]
+        now_msg = await say(send, state, "📍 С текущего момента")
+        users += [n, now_msg]
+        return users, now_msg.answered[-1]
     elif repeat == "daily":
         n = await say(send, state, "2")
         users.append(n)
@@ -849,3 +855,47 @@ async def test_failed_delete_does_not_break_flow(send, press, fsm, bot):
     await make_user(1, tz="UTC")
     _, confirmation = await run_flow(send, press, fsm(1), "once")
     assert "✅ Напоминание установлено" in confirmation.text
+
+
+
+# ---------- Один шаг — одно сообщение ----------
+
+@pytest.mark.parametrize("repeat", ["once", "hourly", "daily", "weekly", "monthly"])
+async def test_every_step_is_one_message(send, press, fsm, repeat):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    users, confirmation = await run_flow(send, press, state, repeat)
+    for user_msg in users:
+        assert len(user_msg.answered) == 1, [m.text for m in user_msg.answered]
+    # и на каждое нажатие кнопки — тоже не больше одного нового сообщения
+    for m in bot_messages(*users):
+        assert len(m.answered) <= 1, [r.text for r in m.answered]
+
+
+async def test_inline_cancel_button_cancels_flow(send, press, fsm, bot):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    content = await flow_to_content(send, press, state, "once")
+    calendar_msg = content.answered[-1]
+    cb = FakeCallback("cancel_flow", calendar_msg)
+    await press(cb, state)
+
+    assert await state.get_state() is None
+    assert cb.answers
+    done = calendar_msg.answered[-1]
+    assert "отменено" in done.text.lower()
+    assert ["➕ Новое напоминание"] in reply_rows(markup_of(done))
+    assert calendar_msg.message_id in deleted_ids(bot)
+    assert await all_reminders() == []
+
+
+async def test_start_now_button_only_for_hours(send, press, fsm, main_module):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    content = await flow_to_content(send, press, state, "once")
+    day = tomorrow_utc()
+    await press(FakeCallback(f"date_1_{day.year}_{day.month}_{day.day}", content.answered[-1]), state)
+    reply = await say(send, state, "📍 С текущего момента")
+    assert await all_reminders() == []
+    assert await state.get_state() == main_module.ReminderFlow.waiting_for_time.state
+    assert "1015" in reply.answered[-1].text
