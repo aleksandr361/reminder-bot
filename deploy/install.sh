@@ -27,9 +27,7 @@ id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --sh
 install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$APP_DIR"
 
 echo "==> Файлы бота"
-install -o "$APP_USER" -g "$APP_USER" -m 640 \
-    "$SRC_DIR"/main.py "$SRC_DIR"/storage.py "$SRC_DIR"/keyboards.py "$SRC_DIR"/scheduler.py \
-    "$SRC_DIR"/requirements.txt "$APP_DIR"/
+install -o "$APP_USER" -g "$APP_USER" -m 640 "$SRC_DIR"/*.py "$SRC_DIR"/requirements.txt "$APP_DIR"/
 for f in .env reminders.db; do
     if [ -f "$SRC_DIR/$f" ] && { [ ! -f "$APP_DIR/$f" ] || { [ "$f" = .env ] && [ "$REPLACE_ENV" = 1 ]; }; }; then
         install -o "$APP_USER" -g "$APP_USER" -m 600 "$SRC_DIR/$f" "$APP_DIR/$f"

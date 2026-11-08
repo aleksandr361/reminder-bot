@@ -9,7 +9,7 @@ import asyncio
 import calendar
 import json
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram.exceptions import (
@@ -21,6 +21,7 @@ from aiogram.exceptions import (
 
 from keyboards import get_snooze_keyboard
 from storage import get_due_reminders, set_reminder_run_at, update_reminder_status
+from texts import format_duration, month_days
 
 log = logging.getLogger(__name__)
 
@@ -104,19 +105,37 @@ def compute_next_run(repeat_type: str, run_at: datetime, tz_name: str | None,
             day += timedelta(days=1)
 
     if repeat_type == "monthly":
-        # В месяцах, где нужного числа нет (31-е в феврале), — последний день месяца
-        try:
-            day_of_month = int(config.get("day") or local.day)
-        except (TypeError, ValueError):
-            day_of_month = local.day
-        year, month = local.year, local.month
-        for _ in range(1200):
-            year, month = (year + 1, 1) if month == 12 else (year, month + 1)
-            last_day = calendar.monthrange(year, month)[1]
-            candidate = datetime.combine(date(year, month, min(day_of_month, last_day)), local.time(), tzinfo=tz)
-            if candidate > now:
-                return candidate.astimezone(UTC)
+        if not (config.get("last") or config.get("before_end") or month_days(config)):
+            config = {"days": [local.day]}
+        return next_monthly_run(config, tz, local.time(), now)
 
+    return None
+
+
+def _dates_in_month(year: int, month: int, config: dict) -> list[int]:
+    """Числа месяца, в которые срабатывает «каждый месяц». Нет такого числа (31-е в феврале) — последний день."""
+    last_day = calendar.monthrange(year, month)[1]
+    if config.get("last"):
+        return [last_day]
+    if config.get("before_end"):
+        try:
+            n = int(config["before_end"])
+        except (TypeError, ValueError):
+            n = 1
+        return [max(1, last_day - n)]
+    return sorted({min(day, last_day) for day in month_days(config)})
+
+
+def next_monthly_run(config: dict, tz, at: time, after: datetime) -> datetime | None:
+    """Ближайшее срабатывание «каждый месяц» в местное время at строго после after (результат в UTC)."""
+    local_after = after.astimezone(tz)
+    year, month = local_after.year, local_after.month
+    for _ in range(1200):
+        for day in _dates_in_month(year, month, config):
+            candidate = datetime.combine(date(year, month, day), at, tzinfo=tz)
+            if candidate > after:
+                return candidate.astimezone(UTC)
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
     return None
 
 
@@ -128,19 +147,27 @@ async def _send(bot, reminder: dict):
     text = reminder.get("text") or ""
     keyboard = get_snooze_keyboard(reminder["id"], reminder.get("repeat_type") or "once")
 
+    header = HEADER
+    snoozed = _config(reminder.get("repeat_config")).get("snoozed")
+    if snoozed:
+        try:
+            header += f" (отложено на {format_duration(int(snoozed))})"
+        except (TypeError, ValueError):
+            header += " (отложено)"
+
     if kind in CAPTION_SENDERS and file_id:
-        caption = f"{HEADER}\n\n{text}" if text else HEADER
+        caption = f"{header}\n\n{text}" if text else header
         await getattr(bot, CAPTION_SENDERS[kind])(
             chat_id, file_id, caption=caption[:MAX_CAPTION_LEN], parse_mode=None, reply_markup=keyboard
         )
     elif kind in NO_CAPTION_SENDERS and file_id:
         # У кружков и стикеров нет подписи — кнопки отдельным сообщением
         await getattr(bot, NO_CAPTION_SENDERS[kind])(chat_id, file_id)
-        await bot.send_message(chat_id, HEADER, reply_markup=keyboard)
+        await bot.send_message(chat_id, header, reply_markup=keyboard)
     else:
         await bot.send_message(
             chat_id,
-            f"{HEADER}\n\n📝 {text}"[:MAX_MESSAGE_LEN],
+            f"{header}\n\n📝 {text}"[:MAX_MESSAGE_LEN],
             parse_mode=None,  # текст пользователя отправляем как есть
             reply_markup=keyboard,
         )

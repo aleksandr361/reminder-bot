@@ -35,6 +35,7 @@ class FakeMessage:
         self.chat = SimpleNamespace(id=chat_id)
         self.from_user = SimpleNamespace(id=chat_id)
         self.text = text
+        self.caption = None
         self.location = location
         self.sent = []
         self.answered = []  # сообщения, которые бот отправил в ответ (с их message_id)
@@ -51,6 +52,9 @@ class FakeMessage:
 
     async def edit_reply_markup(self, **kwargs):
         self.sent.append(("edit_reply_markup", None, kwargs))
+
+    async def edit_caption(self, caption=None, **kwargs):
+        self.sent.append(("edit_caption", caption, kwargs))
 
     def texts(self):
         return [t for _, t, _ in self.sent if t is not None]

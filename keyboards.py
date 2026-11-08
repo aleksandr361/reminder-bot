@@ -15,6 +15,9 @@ from aiogram.types import (
 BTN_NEW = "➕ Новое напоминание"
 BTN_LIST = "📋 Мои напоминания"
 BTN_SETTINGS = "⚙️ Настройки"
+# Во время создания напоминания эта кнопка всегда внизу
+BTN_CANCEL = "❌ Отмена"
+BTN_CONFIRM = "✔ Подтвердить выбор"
 
 WEEKDAYS = [
     ("mon", "Пн"), ("tue", "Вт"), ("wed", "Ср"), ("thu", "Чт"),
@@ -24,14 +27,15 @@ MONTHS = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ]
-# Время на клавиатуре: каждый час, по 4 в ряд
-TIME_PRESETS = [f"{hour:02d}:00" for hour in range(24)]
+# Время на клавиатуре: с 08:00 до 23:00, по 4 в ряд
+TIME_PRESETS = [f"{hour:02d}:00" for hour in range(8, 24)]
 TIME_COLUMNS = 4
 SNOOZE_MINUTES = [(10, "10 мин"), (30, "30 мин"), (60, "1 час")]
-# Частые значения N для «Каждые N часов» (hourly) и «Каждые N дней» (daily)
+# Частые значения N: «Каждые N часов», «Каждые N дней», «За N дней до конца месяца»
 INTERVAL_PRESETS = {
     "hourly": [1, 2, 3, 4, 6, 8, 12, 24],
-    "daily": [1, 2, 3, 4, 5, 7, 10, 14],
+    "daily": [1, 2, 3, 7, 10, 14, 21, 30],
+    "before_end": [1, 2, 3, 5, 7, 10, 14],
 }
 # Как в календаре показывается сегодняшнее число
 TODAY_FORMAT = "•{}•"
@@ -47,6 +51,12 @@ def _inline(rows) -> InlineKeyboardMarkup:
 
 def _chunks(items, size):
     return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _reply(texts, columns: int, placeholder: str | None = None) -> ReplyKeyboardMarkup:
+    """Нижняя клавиатура шага: кнопки по columns в ряд и «❌ Отмена» последней строкой."""
+    rows = _chunks([KeyboardButton(text=t) for t in texts], columns) + [[KeyboardButton(text=BTN_CANCEL)]]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, input_field_placeholder=placeholder)
 
 
 # ---------- Главное меню и часовой пояс ----------
@@ -78,9 +88,13 @@ def get_timezone_geo_button() -> ReplyKeyboardMarkup:
 
 # ---------- Создание напоминания ----------
 
+def get_cancel_keyboard() -> ReplyKeyboardMarkup:
+    return _reply([], 1)
+
+
 def get_repeat_type_keyboard() -> InlineKeyboardMarkup:
     return _inline([
-        [_btn("📅 Однократно", "repeat_once")],
+        [_btn("🗓 Однократно", "repeat_once")],
         [_btn("🔁 Каждые N часов", "repeat_hourly")],
         [_btn("🔁 Каждые N дней", "repeat_daily")],
         [_btn("📆 Каждую неделю", "repeat_weekly")],
@@ -88,15 +102,10 @@ def get_repeat_type_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def get_interval_keyboard(repeat_type: str) -> ReplyKeyboardMarkup:
-    """Числа для «Каждые N часов» / «Каждые N дней». Любое другое число можно напечатать."""
-    numbers = INTERVAL_PRESETS[repeat_type]
-    buttons = [KeyboardButton(text=str(n)) for n in numbers]
-    return ReplyKeyboardMarkup(
-        keyboard=_chunks(buttons, 4),
-        resize_keyboard=True,
-        input_field_placeholder="Или введите своё число",
-    )
+def get_interval_keyboard(kind: str) -> ReplyKeyboardMarkup:
+    """Числа для «Каждые N часов» (hourly), «Каждые N дней» (daily), «За N дней до конца месяца» (before_end).
+    Любое другое число можно напечатать."""
+    return _reply([str(n) for n in INTERVAL_PRESETS[kind]], 4, "Или введите своё число")
 
 
 def get_weekdays_keyboard(selected=None) -> InlineKeyboardMarkup:
@@ -105,17 +114,31 @@ def get_weekdays_keyboard(selected=None) -> InlineKeyboardMarkup:
         _btn(f"✅ {name}" if code in selected else name, f"weekday_{code}")
         for code, name in WEEKDAYS
     ]
-    return _inline([buttons[:4], buttons[4:], [_btn("Готово ➡️", "weekday_done")]])
+    return _inline([buttons[:4], buttons[4:], [_btn(BTN_CONFIRM, "weekday_done")]])
+
+
+def get_month_mode_keyboard() -> InlineKeyboardMarkup:
+    return _inline([
+        [_btn("📅 В указанные дни месяца", "monthmode_days")],
+        [_btn("📆 В последний день месяца", "monthmode_last")],
+        [_btn("⏳ За N дней до конца месяца", "monthmode_before")],
+    ])
+
+
+def get_month_days_keyboard(selected=None) -> InlineKeyboardMarkup:
+    """Числа 1–31 (можно выбрать несколько) и «Подтвердить выбор»."""
+    selected = set(selected or ())
+    buttons = [_btn(f"✅{d}" if d in selected else str(d), f"mday_{d}") for d in range(1, 32)]
+    return _inline(_chunks(buttons, 7) + [[_btn(BTN_CONFIRM, "mday_done")]])
+
+
+def get_start_now_keyboard() -> InlineKeyboardMarkup:
+    return _inline([[_btn("📍 С текущего момента", "start_now")]])
 
 
 def get_time_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура с часами вместо обычной. Своё время пользователь просто печатает (ЧЧММ)."""
-    buttons = [KeyboardButton(text=t) for t in TIME_PRESETS]
-    return ReplyKeyboardMarkup(
-        keyboard=_chunks(buttons, TIME_COLUMNS),
-        resize_keyboard=True,
-        input_field_placeholder="Или введите ЧЧММ, например 1430",
-    )
+    """Клавиатура с часами вместо обычной. Своё время пользователь просто печатает (1015)."""
+    return _reply(TIME_PRESETS, TIME_COLUMNS, "Или введите время, например 1015")
 
 
 def get_calendar(year: int, month: int, chat_id, today: date | None = None) -> InlineKeyboardMarkup:

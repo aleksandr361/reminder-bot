@@ -45,6 +45,10 @@ KEYBOARD_CASES = [
     (lambda: kb.get_snooze_keyboard(5, "once"), None, {"snooze_reminder", "done_reminder"}),
     (lambda: kb.get_snooze_keyboard(5, "weekly"), None,
      {"snooze_reminder", "done_reminder", "cancel_series_reminder"}),
+    (lambda: kb.get_month_mode_keyboard(), "waiting_for_month_mode", {"month_mode_selected"}),
+    (lambda: kb.get_month_days_keyboard(), "waiting_for_month_days", {"month_day_toggle"}),
+    (lambda: kb.get_month_days_keyboard({1, 31}), "waiting_for_month_days", {"month_day_toggle"}),
+    (lambda: kb.get_start_now_keyboard(), "waiting_for_time", {"start_now_selected"}),
     (lambda: kb.get_reminder_list_keyboard(), None,
      {"new_reminder_callback", "my_reminders_callback", "settings_callback"}),
 ]
@@ -68,13 +72,15 @@ async def test_repeat_type_keyboard_offers_all_types_one_per_row():
     assert all(len(row) == 1 for row in markup.inline_keyboard)
 
 
-@pytest.mark.parametrize("kind", ["hourly", "daily"])
-async def test_interval_keyboard_is_reply_keyboard_with_numbers(kind):
+@pytest.mark.parametrize("kind", ["hourly", "daily", "before_end"])
+async def test_interval_keyboard_is_reply_keyboard_with_numbers_and_cancel(kind):
     markup = kb.get_interval_keyboard(kind)
     assert isinstance(markup, ReplyKeyboardMarkup)
-    texts = [b.text for row in markup.keyboard for b in row]
-    assert texts and all(t.isdigit() and int(t) >= 1 for t in texts)
-    assert texts[0] == "1"
+    rows = [[b.text for b in row] for row in markup.keyboard]
+    assert rows[-1] == ["❌ Отмена"]
+    numbers = [t for row in rows[:-1] for t in row]
+    assert numbers and all(t.isdigit() and int(t) >= 1 for t in numbers)
+    assert numbers[0] == "1"
     assert markup.input_field_placeholder and "число" in markup.input_field_placeholder.lower()
 
 
@@ -91,13 +97,27 @@ async def test_weekdays_keyboard_has_all_days_done_and_marks_selected():
     assert "✅" not in text_of(kb.get_weekdays_keyboard({"mon"}), "weekday_tue")
 
 
-async def test_time_keyboard_is_reply_keyboard_with_every_hour(main_module):
+async def test_time_keyboard_has_hours_8_to_23_and_cancel(main_module):
     markup = kb.get_time_keyboard()
     assert isinstance(markup, ReplyKeyboardMarkup)  # обычная клавиатура, а не кнопки в сообщении
-    texts = [b.text for row in markup.keyboard for b in row]
-    assert texts == [f"{h:02d}:00" for h in range(24)]
-    assert [main_module.parse_time(t) for t in texts] == [time(h, 0) for h in range(24)]
-    assert markup.input_field_placeholder and "ЧЧММ" in markup.input_field_placeholder
+    rows = [[b.text for b in row] for row in markup.keyboard]
+    assert rows[-1] == ["❌ Отмена"]
+    hours = [t for row in rows[:-1] for t in row]
+    assert hours == [f"{h:02d}:00" for h in range(8, 24)]
+    assert all(len(row) == 4 for row in rows[:-1])
+    assert [main_module.parse_time(t) for t in hours] == [time(h, 0) for h in range(8, 24)]
+
+
+async def test_cancel_keyboard():
+    markup = kb.get_cancel_keyboard()
+    assert [[b.text for b in row] for row in markup.keyboard] == [["❌ Отмена"]]
+
+
+async def test_month_days_keyboard_marks_selected():
+    texts = {b.callback_data: b.text for row in kb.get_month_days_keyboard({5, 29}).inline_keyboard for b in row}
+    assert texts["mday_5"] != "5" and "5" in texts["mday_5"]
+    assert texts["mday_6"] == "6"
+    assert texts["mday_done"] == "✔ Подтвердить выбор"
 
 
 async def test_calendar_has_every_day_of_month():

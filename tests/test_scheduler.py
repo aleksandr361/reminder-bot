@@ -3,6 +3,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
 from aiogram.methods import SendMessage
 
@@ -328,3 +330,68 @@ async def test_sticker_is_sent_with_separate_message_for_buttons():
     assert "Напоминание" in text
     datas = [b.callback_data for row in kwargs["reply_markup"].inline_keyboard for b in row]
     assert f"done_{rid}" in datas
+
+
+# ---------- Режимы «каждый месяц» по ТЗ ----------
+
+def month_cfg(**kw):
+    return json.dumps(kw)
+
+
+def run(rt, start_local, cfg, tz="Europe/Moscow"):
+    start = start_local.astimezone(UTC)
+    return scheduler.compute_next_run(rt, start, tz, cfg, start + timedelta(seconds=1)).astimezone(MSK)
+
+
+def test_month_several_days_in_one_month():
+    nxt = run("monthly", datetime(2027, 2, 5, 9, 0, tzinfo=MSK), month_cfg(days=[5, 29]))
+    assert nxt == datetime(2027, 2, 28, 9, 0, tzinfo=MSK)  # 29-го в феврале нет — последний день
+    assert run("monthly", nxt, month_cfg(days=[5, 29])) == datetime(2027, 3, 5, 9, 0, tzinfo=MSK)
+
+
+def test_month_days_that_collapse_to_last_day_send_once():
+    nxt = run("monthly", datetime(2027, 2, 5, 9, 0, tzinfo=MSK), month_cfg(days=[5, 30, 31]))
+    assert nxt == datetime(2027, 2, 28, 9, 0, tzinfo=MSK)
+    assert run("monthly", nxt, month_cfg(days=[5, 30, 31])) == datetime(2027, 3, 5, 9, 0, tzinfo=MSK)
+
+
+def test_month_last_day():
+    jan = datetime(2027, 1, 31, 19, 0, tzinfo=MSK)
+    feb = run("monthly", jan, month_cfg(last=True))
+    assert feb == datetime(2027, 2, 28, 19, 0, tzinfo=MSK)
+    assert run("monthly", feb, month_cfg(last=True)) == datetime(2027, 3, 31, 19, 0, tzinfo=MSK)
+
+
+def test_month_n_days_before_end():
+    dec = datetime(2026, 12, 28, 18, 0, tzinfo=MSK)
+    jan = run("monthly", dec, month_cfg(before_end=3))
+    assert jan == datetime(2027, 1, 28, 18, 0, tzinfo=MSK)
+    assert run("monthly", jan, month_cfg(before_end=3)) == datetime(2027, 2, 25, 18, 0, tzinfo=MSK)
+
+
+def test_next_monthly_run_for_first_reminder():
+    after = datetime(2026, 12, 10, 12, 0, tzinfo=MSK)
+    first = scheduler.next_monthly_run({"days": [5, 29]}, MSK, after.time().replace(hour=9), after)
+    assert first.astimezone(MSK) == datetime(2026, 12, 29, 9, 0, tzinfo=MSK)
+
+
+# ---------- Отложенные напоминания ----------
+
+@pytest.mark.parametrize("minutes,label", [(10, "10 минут"), (30, "30 минут"), (60, "1 час")])
+async def test_snoozed_reminder_says_it_was_snoozed(minutes, label):
+    uid = await make_user(77)
+    await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), "купить хлеб",
+                                  repeat_config=json.dumps({"snoozed": minutes}))
+    bot = FakeBot()
+    await scheduler.check_due_reminders(bot)
+    _, text, _ = bot.sent[0]
+    assert f"отложено на {label}" in text
+    assert "купить хлеб" in text
+
+
+async def test_regular_reminder_has_no_snooze_note():
+    uid = await make_user(77)
+    await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), "x")
+    bot = FakeBot()
+    await scheduler.check_due_reminders(bot)
+    assert "отложено" not in bot.sent[0][1]

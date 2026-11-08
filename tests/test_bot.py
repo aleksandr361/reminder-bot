@@ -89,7 +89,8 @@ async def test_hourly_starts_at_selected_time_today(send, fsm, main_module):
     assert datetime.fromisoformat(rem["run_at"]) == start.replace(tzinfo=None)
 
 
-async def test_hourly_with_passed_time_starts_tomorrow(send, fsm, main_module):
+async def test_hourly_with_passed_time_continues_rhythm(send, fsm, main_module):
+    # Отсчёт от выбранного времени: если оно уже прошло, берём следующий шаг ритма
     await make_user(1)
     state = fsm(1)
     passed = utc_now_minute() - timedelta(minutes=30)
@@ -97,7 +98,10 @@ async def test_hourly_with_passed_time_starts_tomorrow(send, fsm, main_module):
     await send(FakeMessage(1, text=f"{passed:%H:%M}"), state)
 
     rem = (await all_reminders())[-1]
-    assert datetime.fromisoformat(rem["run_at"]) == (passed + timedelta(days=1)).replace(tzinfo=None)
+    expected = datetime.combine(datetime.now(timezone.utc).date(), passed.time())
+    while expected <= datetime.now(timezone.utc).replace(tzinfo=None):
+        expected += timedelta(hours=1)
+    assert datetime.fromisoformat(rem["run_at"]) == expected
 
 
 # ---------- 4. Stale buttons (no active dialog) ----------
@@ -337,6 +341,31 @@ async def test_snooze_keeps_attachment(press, fsm):
     snoozed = (await all_reminders())[-1]
     assert snoozed["id"] != rid
     assert (snoozed["content_type"], snoozed["file_id"], snoozed["text"]) == ("photo", "photo-id", "рецепт")
+    assert json.loads(snoozed["repeat_config"]) == {"snoozed": 10}
+
+
+@pytest.mark.parametrize("data", ["done_{id}", "snooze_{id}_60", "cancel_series_{id}"])
+async def test_buttons_under_photo_reminder_edit_caption(press, fsm, data):
+    """У сообщения с фото нет текста — менять нужно подпись, а не текст."""
+    owner = await make_user(1)
+    rid = await storage.create_reminder(owner, datetime.now(timezone.utc) + timedelta(days=1), "рецепт",
+                                        repeat_type="daily", content_type="photo", file_id="photo-id")
+    photo_msg = FakeMessage(1)
+    photo_msg.caption = "🔔 Напоминание\n\nрецепт"
+    cb = FakeCallback(data.format(id=rid), photo_msg)
+    await press(cb, fsm(1))
+
+    kinds = [kind for kind, _, _ in photo_msg.sent]
+    assert "edit_caption" in kinds and "edit_text" not in kinds
+    assert cb.answers
+
+
+async def test_snooze_message_tells_duration(press, fsm):
+    owner = await make_user(1)
+    rid = await storage.create_reminder(owner, datetime.now(timezone.utc) + timedelta(days=1), "x")
+    msg = FakeMessage(1, text="🔔 Напоминание\n\n📝 x")
+    await press(FakeCallback(f"snooze_{rid}_60", msg), fsm(1))
+    assert any("отложено на 1 час" in (t or "") for _, t, _ in msg.sent)
 
 
 async def test_calendar_navigation_keeps_today_mark(press, fsm, main_module):

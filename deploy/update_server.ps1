@@ -28,8 +28,9 @@ function Check($step) {
     if ($LASTEXITCODE -ne 0) { Write-Host "Ошибка на шаге: $step" -ForegroundColor Red; exit 1 }
 }
 
-$files = @('main.py', 'storage.py', 'keyboards.py', 'scheduler.py', 'requirements.txt',
-           'deploy/install.sh', 'deploy/reminder-bot.service')
+# Все .py бота из корня папки (тесты в tests/ не нужны на сервере)
+$files = @(Get-ChildItem -File -Filter '*.py' | ForEach-Object { $_.Name }) +
+         @('requirements.txt', 'deploy/install.sh', 'deploy/reminder-bot.service')
 if (Test-Path '.env') { $files += '.env' }
 elseif ($Token) { Write-Host 'Нет файла .env с BOT_TOKEN=...' -ForegroundColor Red; exit 1 }
 
