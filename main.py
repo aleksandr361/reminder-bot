@@ -187,6 +187,14 @@ async def get_own_reminder(reminder_id: int | None, chat_id: int) -> dict | None
     return reminder
 
 
+def mark_done(text: str | None) -> str:
+    """«🔔 Напоминание…» → «✅ Напоминание…» (остальной текст не трогаем)."""
+    text = text or ""
+    if "🔔" in text:
+        return text.replace("🔔", "✅", 1)
+    return f"✅ {text}" if text else "✅"
+
+
 async def set_status_text(message: Message, status: str):
     """Пометить сработавшее напоминание («Готово», «Отложено»…) и убрать его кнопки.
     У фото/файла нет текста — у них меняем подпись."""
@@ -911,17 +919,17 @@ async def done_reminder(callback: CallbackQuery):
         await callback.answer(NOT_FOUND, show_alert=True)
         return
 
-    repeat_type = reminder.get('repeat_type', 'once')
-
-    # Для однократных напоминаний - помечаем как выполненное
-    if repeat_type == 'once':
+    # Однократное больше не нужно; у серии ничего не меняем — она продолжит работать по расписанию
+    if reminder.get('repeat_type', 'once') == 'once':
         await update_reminder_status(reminder_id, 'sent')
-        await set_status_text(callback.message, "✅ Готово! Напоминание выполнено.")
-    else:
-        # Для циклических - просто убираем кнопки, напоминание продолжит работать
-        await set_status_text(callback.message, "✅ Готово! Напоминание продолжит работать по расписанию.")
 
-    await callback.answer("✅ Готово")
+    # Само напоминание остаётся как было: только 🔔 → ✅ и без кнопок
+    message = callback.message
+    if message.text is not None:
+        await message.edit_text(mark_done(message.text), reply_markup=None)
+    else:
+        await message.edit_caption(caption=mark_done(message.caption), reply_markup=None)
+    await callback.answer()
 
 
 # Старый обработчик cancel_ (для совместимости)

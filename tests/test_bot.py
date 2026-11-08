@@ -436,3 +436,62 @@ async def test_list_cancel_from_previous_version_refuses_strangers(press, fsm):
     await press(cb, fsm(2))
     assert (await storage.get_reminder_by_id(once))["status"] == "pending"
     assert cb.answers[-1][1] is True
+
+
+# ---------- «✅ Готово»: колокольчик меняется на галочку ----------
+
+async def press_done(press, fsm, repeat_type="once", text=None, caption=None):
+    owner = await make_user(1)
+    rid = await storage.create_reminder(owner, datetime.now(timezone.utc) + timedelta(days=1), "ооо",
+                                        repeat_type=repeat_type)
+    msg = FakeMessage(1, text=text)
+    msg.caption = caption
+    cb = FakeCallback(f"done_{rid}", msg)
+    await press(cb, fsm(1))
+    return rid, msg, cb
+
+
+@pytest.mark.parametrize("repeat_type", ["once", "daily"])
+async def test_done_only_swaps_bell_for_check(press, fsm, repeat_type):
+    rid, msg, cb = await press_done(press, fsm, repeat_type, text="🔔 Напоминание\n\n📝 ооо")
+
+    kind, text, kwargs = msg.sent[-1]
+    assert kind == "edit_text"
+    assert text == "✅ Напоминание\n\n📝 ооо"  # больше ничего не дописываем
+    assert kwargs.get("reply_markup") is None  # кнопки убираем
+    assert cb.answers == [(None, False)]       # без всплывающего «Готово»
+    assert msg.answered == []
+
+
+async def test_done_keeps_series_schedule(press, fsm):
+    rid, _, _ = await press_done(press, fsm, "daily", text="🔔 Напоминание\n\n📝 ооо")
+    reminder = await storage.get_reminder_by_id(rid)
+    assert reminder["status"] == "pending"
+
+
+async def test_done_marks_one_time_reminder_finished(press, fsm):
+    rid, _, _ = await press_done(press, fsm, "once", text="🔔 Напоминание\n\n📝 ооо")
+    assert (await storage.get_reminder_by_id(rid))["status"] == "sent"
+
+
+async def test_done_on_snoozed_reminder_keeps_snooze_note(press, fsm):
+    _, msg, _ = await press_done(press, fsm, text="🔔 Напоминание (отложено на 10 минут)\n\n📝 ооо")
+    assert msg.sent[-1][1] == "✅ Напоминание (отложено на 10 минут)\n\n📝 ооо"
+
+
+async def test_done_on_photo_reminder_changes_caption(press, fsm):
+    _, msg, _ = await press_done(press, fsm, caption="🔔 Напоминание\n\nрецепт")
+    kind, caption, kwargs = msg.sent[-1]
+    assert kind == "edit_caption"
+    assert caption == "✅ Напоминание\n\nрецепт"
+    assert kwargs.get("reply_markup") is None
+
+
+async def test_done_on_sticker_header_message(press, fsm):
+    _, msg, _ = await press_done(press, fsm, text="🔔 Напоминание")
+    assert msg.sent[-1][1] == "✅ Напоминание"
+
+
+async def test_done_on_message_without_bell_adds_check(press, fsm):
+    _, msg, _ = await press_done(press, fsm, text="Старое напоминание")
+    assert msg.sent[-1][1] == "✅ Старое напоминание"
