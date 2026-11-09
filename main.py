@@ -66,7 +66,6 @@ tf = TimezoneFinder()
 
 # Типы повторения. hourly/daily — «каждые N часов/дней», N хранится в repeat_config {"every": N}
 REPEAT_TYPES = tuple(REPEAT_LABELS)
-REPEAT_ICONS = {'once': '🗓', 'hourly': '🔁', 'daily': '🔁', 'weekly': '📆', 'monthly': '📆'}
 # Самое большое N: неделя в часах, год в днях, за 27 дней до конца (в феврале остаётся 1-е число)
 NUMBER_LIMITS = {'hourly': 168, 'daily': 365, 'before_end': 27}
 # Кнопки шагов создания напоминания: работают только пока идёт диалог
@@ -196,32 +195,36 @@ def mark_done(text: str | None) -> str:
 
 
 async def set_status_text(message: Message, status: str):
-    """Пометить сработавшее напоминание («Готово», «Отложено»…) и убрать его кнопки.
-    У фото/файла нет текста — у них меняем подпись."""
+    """Заменить напоминание статусом («❌ Напоминание отменено.») и убрать его кнопки.
+    У фото/файла нет текста — у них дописываем в подпись; у стикера и кружка только убираем кнопки."""
     if message.text is not None:
         await message.edit_text(status, reply_markup=None)
+    elif message.caption is not None:
+        await message.edit_caption(caption=f"{message.caption}\n\n{status}"[:1024], reply_markup=None)
     else:
-        caption = f"{message.caption}\n\n{status}" if message.caption else status
-        await message.edit_caption(caption=caption[:1024], reply_markup=None)
+        await message.edit_reply_markup(reply_markup=None)
 
 
-def format_reminder(index: int, reminder: dict, tz: ZoneInfo) -> str:
-    run_at = datetime.fromisoformat(reminder['run_at']).replace(tzinfo=UTC)
-    local_time = run_at.astimezone(tz)
+def content_line(content_type: str | None, text: str | None) -> str:
+    """«📝 текст» или «🖼 Фото: подпись» для вложения."""
+    content = describe_content(content_type, text)
+    return content if (content_type or 'text') in ATTACHMENT_LABELS else f"📝 {content}"
+
+
+def format_reminder(reminder: dict, tz: ZoneInfo) -> str:
+    """Напоминание в «Моих напоминаниях»: 📆 Напоминание / 📝 текст / 🕐 когда / 🔄 правило."""
+    local_time = datetime.fromisoformat(reminder['run_at']).replace(tzinfo=UTC).astimezone(tz)
     repeat_type = reminder.get('repeat_type') or 'once'
-    content_type = reminder.get('content_type') or 'text'
 
     # Текст пользователя экранируем: сообщение уходит с parse_mode="HTML",
     # и символы вроде "<" или "&" иначе ломают отправку.
-    content = describe_content(content_type, reminder.get('text'))
-    if content_type == 'text':
-        content = f"📝 {content}"
-    repeat = describe_repeat(repeat_type, load_config(reminder.get('repeat_config')))
+    content = content_line(reminder.get('content_type'), reminder.get('text'))
+    repeat = describe_repeat(repeat_type, load_config(reminder.get('repeat_config')), with_icon=False)
     return (
-        f"{REPEAT_ICONS.get(repeat_type, '🗓')} <b>Напоминание #{index}</b>\n"
+        "📆 <b>Напоминание</b>\n"
         f"{html.escape(content)}\n"
-        f"🕐 {local_time.strftime('%d.%m.%Y %H:%M')}\n"
-        f"{html.escape(repeat)}"
+        f"🕐 {local_time:%d.%m.%Y %H:%M}\n"
+        f"🔄 {html.escape(repeat)}"
     )
 
 
@@ -237,9 +240,9 @@ async def send_reminders_list(message: Message):
 
     user_tz = await get_user_timezone(message.chat.id)
     tz = ZoneInfo(user_tz) if user_tz else UTC
-    for i, reminder in enumerate(reminders, 1):
+    for reminder in reminders:
         await message.answer(
-            format_reminder(i, reminder, tz),
+            format_reminder(reminder, tz),
             parse_mode="HTML",
             reply_markup=get_reminder_actions_inline(reminder['id'], reminder.get('repeat_type', 'once'))
         )
@@ -810,11 +813,15 @@ async def finalize_reminder(message: Message, state: FSMContext, bot: Bot, start
     )
 
     when = f"{format_date(run_at)} в {run_at:%H:%M}"
-    lines = ["✅ Напоминание установлено", "", describe_content(content_type, text), describe_repeat(repeat_type, config)]
+    lines = [
+        "✅ <b>Напоминание установлено</b>",
+        html.escape(content_line(content_type, text)),
+        html.escape(describe_repeat(repeat_type, config)),
+    ]
     if repeat_type == 'monthly' and month_note(config):
-        lines.append(month_note(config))
-    lines.append(f"⏰ {when}" if repeat_type == 'once' else f"⏰ Следующее: {when}")
-    await message.answer("\n".join(lines), reply_markup=get_main_menu_keyboard())
+        lines.append(html.escape(month_note(config)))
+    lines.append(f"🕰 {when}" if repeat_type == 'once' else f"🕰 Следующее: {when}")
+    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=get_main_menu_keyboard())
     await delete_prompts(bot, message.chat.id, state)  # остаётся только итог
     await state.clear()
 
@@ -898,7 +905,7 @@ async def snooze_reminder(callback: CallbackQuery):
 
     new_time = datetime.now(timezone.utc) + timedelta(minutes=minutes)
 
-    # Создаем новое одноразовое напоминание (отложенное); пометка «отложено» попадёт в его текст
+    # Создаем новое одноразовое напоминание (отложенное). Придёт снова просто «🔔текст»
     await create_reminder(reminder['user_id'], new_time, reminder['text'], repeat_type='once',
                           repeat_config=json.dumps({'snoozed': minutes}),
                           content_type=reminder.get('content_type') or 'text', file_id=reminder.get('file_id'))
@@ -906,8 +913,22 @@ async def snooze_reminder(callback: CallbackQuery):
     # Для циклических напоминаний НЕ отменяем основное напоминание
     # Оно продолжит работать по расписанию
 
-    await set_status_text(callback.message, f"⏰ Напоминание отложено на {format_duration(minutes)}.")
-    await callback.answer(f"✅ Отложено на {format_duration(minutes)}")
+    # Само напоминание остаётся, под ним жирным «⏰ Напоминание отложено на 30 минут.», кнопки убираем
+    note = f"Напоминание отложено на {format_duration(minutes)}."
+    room = len(note) + 4  # «\n⏰ » + заметка не должны вылезти за лимит Telegram
+    message = callback.message
+    if message.text is not None:
+        text = html.escape(message.text[:4096 - room])
+        await message.edit_text(f"{text}\n⏰ <b>{note}</b>", parse_mode="HTML", reply_markup=None)
+        await callback.answer()
+    elif message.caption is not None:
+        caption = html.escape(message.caption[:1024 - room])
+        await message.edit_caption(caption=f"{caption}\n⏰ <b>{note}</b>", parse_mode="HTML", reply_markup=None)
+        await callback.answer()
+    else:
+        # Стикер или кружок: дописать некуда — убираем кнопки и показываем всплывающую подсказку
+        await message.edit_reply_markup(reply_markup=None)
+        await callback.answer(f"⏰ {note}")
 
 
 # Обработчик кнопки "Готово"
@@ -927,8 +948,10 @@ async def done_reminder(callback: CallbackQuery):
     message = callback.message
     if message.text is not None:
         await message.edit_text(mark_done(message.text), reply_markup=None)
-    else:
+    elif message.caption is not None:
         await message.edit_caption(caption=mark_done(message.caption), reply_markup=None)
+    else:
+        await message.edit_reply_markup(reply_markup=None)  # стикер или кружок: менять нечего, убираем кнопки
     await callback.answer()
 
 

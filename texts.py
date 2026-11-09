@@ -88,8 +88,14 @@ def month_days(config: dict) -> list[int]:
     return sorted({d for d in (_int(x, 0) for x in days) if 1 <= d <= 31})
 
 
-def describe_repeat(repeat_type: str, config: dict) -> str:
-    """Правило повторения: «🔁 Каждые 3 часа», «📆 Каждый месяц, 5 и 29 числа»…"""
+def describe_repeat(repeat_type: str, config: dict, with_icon: bool = True) -> str:
+    """Правило повторения: «🔁 Каждые 3 часа», «📆 Каждый месяц, 5 и 29 числа»…
+    with_icon=False — без значка в начале («Каждые 3 часа»), для «Моих напоминаний»."""
+    rule = _repeat_rule(repeat_type, config)
+    return rule if with_icon else rule.split(" ", 1)[1]
+
+
+def _repeat_rule(repeat_type: str, config: dict) -> str:
     if repeat_type in ('hourly', 'daily'):
         n = max(1, _int(config.get('every', 1), 1))
         if repeat_type == 'hourly':

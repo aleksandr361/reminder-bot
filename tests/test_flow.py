@@ -227,8 +227,8 @@ async def test_hours_start_now(send, press, fsm, main_module):
     assert json.loads(rem["repeat_config"]) == {"every": 3}
     final = now_msg.answered[-1].text
     local = run_at
-    assert final == ("✅ Напоминание установлено\n\nпить воду\n🔁 Каждые 3 часа\n"
-                     f"⏰ Следующее: {fmt(main_module, local.date())} в {local:%H:%M}")
+    assert final == ("✅ <b>Напоминание установлено</b>\n📝 пить воду\n🔁 Каждые 3 часа\n"
+                     f"🕰 Следующее: {fmt(main_module, local.date())} в {local:%H:%M}")
     assert await state.get_state() is None
 
 
@@ -287,8 +287,8 @@ async def test_days_full_flow(send, press, fsm, main_module):
     assert time_prompt.text == f"{rule}\n\n{TIME_INSTRUCTION}"
 
     done = await say(send, state, "1000")
-    assert done.answered[-1].text == (f"✅ Напоминание установлено\n\nОтправить отчёт\n{rule}\n"
-                                      f"⏰ Следующее: {fmt(main_module, day)} в 10:00")
+    assert done.answered[-1].text == (f"✅ <b>Напоминание установлено</b>\n📝 Отправить отчёт\n{rule}\n"
+                                      f"🕰 Следующее: {fmt(main_module, day)} в 10:00")
     rem = (await all_reminders())[-1]
     assert json.loads(rem["repeat_config"]) == {"every": 7, "start": day.isoformat()}
 
@@ -303,7 +303,7 @@ async def test_days_start_today_with_passed_time_moves_by_n(send, press, fsm, ma
     done = await say(send, state, "0000")  # сегодня 00:00 уже прошло
 
     assert await run_at_of_last() == datetime.combine(day + timedelta(days=7), time(0, 0), tzinfo=UTC)
-    assert f"⏰ Следующее: {fmt(main_module, day + timedelta(days=7))} в 00:00" in done.answered[-1].text
+    assert f"🕰 Следующее: {fmt(main_module, day + timedelta(days=7))} в 00:00" in done.answered[-1].text
 
 
 # ---------- 5. Каждый месяц ----------
@@ -364,9 +364,9 @@ async def test_month_days_flow(send, press, fsm, main_module):
     expected = next_month_day_run([5, 29], time(9, 0), datetime.now(UTC))
     assert await run_at_of_last() == expected
     assert done.answered[-1].text == (
-        "✅ Напоминание установлено\n\nОплатить аренду\n📆 Каждый месяц, 5 и 29 числа\n"
+        "✅ <b>Напоминание установлено</b>\n📝 Оплатить аренду\n📆 Каждый месяц, 5 и 29 числа\n"
         "ℹ️ В месяцах без 29 числа напоминание придёт в последний день\n"
-        f"⏰ Следующее: {fmt(main_module, expected.date())} в 09:00"
+        f"🕰 Следующее: {fmt(main_module, expected.date())} в 09:00"
     )
     assert json.loads((await all_reminders())[-1]["repeat_config"]) == {"days": [5, 29]}
 
@@ -406,8 +406,8 @@ async def test_month_last_day_flow(send, press, fsm, main_module):
     expected = next_month_day_run([31], time(19, 0), datetime.now(UTC))
     assert await run_at_of_last() == expected
     assert done.answered[-1].text == (
-        "✅ Напоминание установлено\n\nОплатить коммуналку\n📆 Каждый месяц, последний день\n"
-        f"⏰ Следующее: {fmt(main_module, expected.date())} в 19:00"
+        "✅ <b>Напоминание установлено</b>\n📝 Оплатить коммуналку\n📆 Каждый месяц, последний день\n"
+        f"🕰 Следующее: {fmt(main_module, expected.date())} в 19:00"
     )
     assert json.loads((await all_reminders())[-1]["repeat_config"]) == {"last": True}
 
@@ -437,8 +437,8 @@ async def test_month_before_end_flow(send, press, fsm, main_module):
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
     assert await run_at_of_last() == expected
     assert done.answered[-1].text == (
-        "✅ Напоминание установлено\n\nПодготовить отчёт\n📆 Каждый месяц, за 3 дня до конца месяца\n"
-        f"⏰ Следующее: {fmt(main_module, expected.date())} в 18:00"
+        "✅ <b>Напоминание установлено</b>\n📝 Подготовить отчёт\n📆 Каждый месяц, за 3 дня до конца месяца\n"
+        f"🕰 Следующее: {fmt(main_module, expected.date())} в 18:00"
     )
     assert json.loads((await all_reminders())[-1]["repeat_config"]) == {"before_end": 3}
 
@@ -471,8 +471,8 @@ async def test_once_flow(send, press, fsm, main_module):
     assert [CANCEL] in reply_rows(markup_of(time_prompt))
 
     done = await say(send, state, "2000")
-    assert done.answered[-1].text == ("✅ Напоминание установлено\n\nк ортопеду с Андреем\n🗓 Однократно\n"
-                                      f"⏰ {fmt(main_module, day)} в 20:00")
+    assert done.answered[-1].text == ("✅ <b>Напоминание установлено</b>\n📝 к ортопеду с Андреем\n🗓 Однократно\n"
+                                      f"🕰 {fmt(main_module, day)} в 20:00")
     assert ["➕ Новое напоминание"] in reply_rows(markup_of(done.answered[-1]))
     assert (await all_reminders())[-1]["run_at"] == f"{day.isoformat()}T20:00:00"
     assert await state.get_state() is None
@@ -517,8 +517,8 @@ async def test_weekly_flow(send, press, fsm, main_module):
 
     done = await say(send, state, "2000")
     run_at = await run_at_of_last()
-    assert done.answered[-1].text == ("✅ Напоминание установлено\n\nспортзал\n📆 Каждую неделю: Пн, Ср\n"
-                                      f"⏰ Следующее: {fmt(main_module, run_at.date())} в 20:00")
+    assert done.answered[-1].text == ("✅ <b>Напоминание установлено</b>\n📝 спортзал\n📆 Каждую неделю: Пн, Ср\n"
+                                      f"🕰 Следующее: {fmt(main_module, run_at.date())} в 20:00")
     assert run_at.weekday() in (0, 2)
     assert json.loads((await all_reminders())[-1]["repeat_config"]) == {"weekdays": ["mon", "wed"]}
 
@@ -752,7 +752,7 @@ async def test_only_confirmation_stays_after_flow(send, press, fsm, bot, repeat)
     state = fsm(1)
     users, confirmation = await run_flow(send, press, state, repeat)
 
-    assert "✅ Напоминание установлено" in confirmation.text
+    assert "Напоминание установлено" in confirmation.text
     questions = [m for m in bot_messages(*users) if m is not confirmation]
     assert questions
     assert {m.message_id for m in questions} <= deleted_ids(bot)
@@ -846,7 +846,7 @@ async def test_failed_delete_does_not_break_flow(send, press, fsm, bot):
     bot.delete_messages = cannot_delete
     await make_user(1, tz="UTC")
     _, confirmation = await run_flow(send, press, fsm(1), "once")
-    assert "✅ Напоминание установлено" in confirmation.text
+    assert "Напоминание установлено" in confirmation.text
 
 
 
@@ -902,7 +902,7 @@ async def test_cancel_is_always_on_keyboard(send, press, fsm, bot, repeat):
         assert keyboard and keyboard[-1] == [CANCEL], keyboard
 
     users, confirmation = await walk(send, press, state, repeat, check)
-    assert "✅ Напоминание установлено" in confirmation.text
+    assert "Напоминание установлено" in confirmation.text
     assert ["➕ Новое напоминание"] in visible_keyboard(bot, bot_messages(*users))
 
 
@@ -968,3 +968,18 @@ async def test_start_now_button_only_for_hours(send, press, fsm, main_module):
     assert await all_reminders() == []
     assert await state.get_state() == main_module.ReminderFlow.waiting_for_time.state
     assert "1015" in reply.answered[-1].text
+
+
+# ---------- Формат «Напоминание установлено» как на скриншоте ----------
+
+async def test_confirmation_is_bold_html_and_escapes_text(send, press, fsm, main_module):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    content = await flow_to_content(send, press, state, "once", text="<купить> & хлеб")
+    day = tomorrow_utc()
+    await press(FakeCallback(f"date_1_{day.year}_{day.month}_{day.day}", content.answered[-1]), state)
+    done = (await say(send, state, "2100")).answered[-1]
+
+    assert done.kwargs.get("parse_mode") == "HTML"
+    assert done.text == ("✅ <b>Напоминание установлено</b>\n📝 &lt;купить&gt; &amp; хлеб\n🗓 Однократно\n"
+                         f"🕰 {fmt(main_module, day)} в 21:00")

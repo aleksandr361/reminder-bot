@@ -351,21 +351,13 @@ async def test_buttons_under_photo_reminder_edit_caption(press, fsm, data):
     rid = await storage.create_reminder(owner, datetime.now(timezone.utc) + timedelta(days=1), "рецепт",
                                         repeat_type="daily", content_type="photo", file_id="photo-id")
     photo_msg = FakeMessage(1)
-    photo_msg.caption = "🔔 Напоминание\n\nрецепт"
+    photo_msg.caption = "🔔рецепт"
     cb = FakeCallback(data.format(id=rid), photo_msg)
     await press(cb, fsm(1))
 
     kinds = [kind for kind, _, _ in photo_msg.sent]
     assert "edit_caption" in kinds and "edit_text" not in kinds
     assert cb.answers
-
-
-async def test_snooze_message_tells_duration(press, fsm):
-    owner = await make_user(1)
-    rid = await storage.create_reminder(owner, datetime.now(timezone.utc) + timedelta(days=1), "x")
-    msg = FakeMessage(1, text="🔔 Напоминание\n\n📝 x")
-    await press(FakeCallback(f"snooze_{rid}_60", msg), fsm(1))
-    assert any("отложено на 1 час" in (t or "") for _, t, _ in msg.sent)
 
 
 async def test_calendar_navigation_keeps_today_mark(press, fsm, main_module):
@@ -438,60 +430,113 @@ async def test_list_cancel_from_previous_version_refuses_strangers(press, fsm):
     assert cb.answers[-1][1] is True
 
 
-# ---------- «✅ Готово»: колокольчик меняется на галочку ----------
+# ---------- Кнопки под сработавшим напоминанием (как на скриншотах) ----------
 
-async def press_done(press, fsm, repeat_type="once", text=None, caption=None):
+async def press_on_fired(press, fsm, data_tpl, repeat_type="once", text=None, caption=None):
     owner = await make_user(1)
     rid = await storage.create_reminder(owner, datetime.now(timezone.utc) + timedelta(days=1), "ооо",
                                         repeat_type=repeat_type)
     msg = FakeMessage(1, text=text)
     msg.caption = caption
-    cb = FakeCallback(f"done_{rid}", msg)
+    cb = FakeCallback(data_tpl.format(id=rid), msg)
     await press(cb, fsm(1))
     return rid, msg, cb
 
 
 @pytest.mark.parametrize("repeat_type", ["once", "daily"])
 async def test_done_only_swaps_bell_for_check(press, fsm, repeat_type):
-    rid, msg, cb = await press_done(press, fsm, repeat_type, text="🔔 Напоминание\n\n📝 ооо")
-
+    _, msg, cb = await press_on_fired(press, fsm, "done_{id}", repeat_type, text="🔔ооо")
     kind, text, kwargs = msg.sent[-1]
-    assert kind == "edit_text"
-    assert text == "✅ Напоминание\n\n📝 ооо"  # больше ничего не дописываем
-    assert kwargs.get("reply_markup") is None  # кнопки убираем
-    assert cb.answers == [(None, False)]       # без всплывающего «Готово»
+    assert (kind, text) == ("edit_text", "✅ооо")
+    assert kwargs.get("reply_markup") is None
+    assert cb.answers == [(None, False)]  # без всплывающих надписей
     assert msg.answered == []
 
 
 async def test_done_keeps_series_schedule(press, fsm):
-    rid, _, _ = await press_done(press, fsm, "daily", text="🔔 Напоминание\n\n📝 ооо")
-    reminder = await storage.get_reminder_by_id(rid)
-    assert reminder["status"] == "pending"
+    rid, _, _ = await press_on_fired(press, fsm, "done_{id}", "daily", text="🔔ооо")
+    assert (await storage.get_reminder_by_id(rid))["status"] == "pending"
 
 
 async def test_done_marks_one_time_reminder_finished(press, fsm):
-    rid, _, _ = await press_done(press, fsm, "once", text="🔔 Напоминание\n\n📝 ооо")
+    rid, _, _ = await press_on_fired(press, fsm, "done_{id}", "once", text="🔔ооо")
     assert (await storage.get_reminder_by_id(rid))["status"] == "sent"
 
 
-async def test_done_on_snoozed_reminder_keeps_snooze_note(press, fsm):
-    _, msg, _ = await press_done(press, fsm, text="🔔 Напоминание (отложено на 10 минут)\n\n📝 ооо")
-    assert msg.sent[-1][1] == "✅ Напоминание (отложено на 10 минут)\n\n📝 ооо"
-
-
 async def test_done_on_photo_reminder_changes_caption(press, fsm):
-    _, msg, _ = await press_done(press, fsm, caption="🔔 Напоминание\n\nрецепт")
+    _, msg, _ = await press_on_fired(press, fsm, "done_{id}", caption="🔔рецепт")
     kind, caption, kwargs = msg.sent[-1]
-    assert kind == "edit_caption"
-    assert caption == "✅ Напоминание\n\nрецепт"
+    assert (kind, caption) == ("edit_caption", "✅рецепт")
     assert kwargs.get("reply_markup") is None
 
 
-async def test_done_on_sticker_header_message(press, fsm):
-    _, msg, _ = await press_done(press, fsm, text="🔔 Напоминание")
-    assert msg.sent[-1][1] == "✅ Напоминание"
+async def test_done_on_sticker_just_removes_buttons(press, fsm):
+    _, msg, cb = await press_on_fired(press, fsm, "done_{id}")  # у стикера нет ни текста, ни подписи
+    kind, _, kwargs = msg.sent[-1]
+    assert kind == "edit_reply_markup" and kwargs.get("reply_markup") is None
+    assert cb.answers
 
 
 async def test_done_on_message_without_bell_adds_check(press, fsm):
-    _, msg, _ = await press_done(press, fsm, text="Старое напоминание")
+    _, msg, _ = await press_on_fired(press, fsm, "done_{id}", text="Старое напоминание")
     assert msg.sent[-1][1] == "✅ Старое напоминание"
+
+
+async def test_snooze_keeps_reminder_and_adds_bold_note(press, fsm):
+    _, msg, cb = await press_on_fired(press, fsm, "snooze_{id}_30", text="🔔Напомни уточнить про <Виноградову>")
+    kind, text, kwargs = msg.sent[-1]
+    assert kind == "edit_text"
+    assert text == "🔔Напомни уточнить про &lt;Виноградову&gt;\n⏰ <b>Напоминание отложено на 30 минут.</b>"
+    assert kwargs.get("parse_mode") == "HTML"
+    assert kwargs.get("reply_markup") is None
+    assert cb.answers == [(None, False)]
+
+
+@pytest.mark.parametrize("minutes,label", [(5, "5 минут"), (15, "15 минут"), (60, "1 час")])
+async def test_snooze_note_duration(press, fsm, minutes, label):
+    _, msg, _ = await press_on_fired(press, fsm, f"snooze_{{id}}_{minutes}", text="🔔ооо")
+    assert msg.sent[-1][1].endswith(f"⏰ <b>Напоминание отложено на {label}.</b>")
+
+
+async def test_snooze_on_photo_adds_note_to_caption(press, fsm):
+    _, msg, _ = await press_on_fired(press, fsm, "snooze_{id}_15", caption="🔔рецепт")
+    kind, caption, kwargs = msg.sent[-1]
+    assert kind == "edit_caption"
+    assert caption == "🔔рецепт\n⏰ <b>Напоминание отложено на 15 минут.</b>"
+    assert kwargs.get("parse_mode") == "HTML"
+
+
+async def test_snooze_on_sticker_removes_buttons_and_tells_in_popup(press, fsm):
+    _, msg, cb = await press_on_fired(press, fsm, "snooze_{id}_5")
+    assert msg.sent[-1][0] == "edit_reply_markup"
+    assert cb.answers and "5 минут" in cb.answers[-1][0]
+
+
+async def test_snoozed_copy_is_created(press, fsm):
+    rid, _, _ = await press_on_fired(press, fsm, "snooze_{id}_5", text="🔔ооо")
+    rems = await all_reminders()
+    assert len(rems) == 2 and rems[-1]["text"] == "ооо" and rems[-1]["repeat_type"] == "once"
+
+
+# ---------- «Мои напоминания» как на скриншоте ----------
+
+async def test_list_item_format_like_screenshot(send, fsm):
+    uid = await make_user(1, tz="UTC")
+    at = (datetime.now(timezone.utc) + timedelta(days=3)).replace(second=0, microsecond=0)
+    await storage.create_reminder(uid, at, "Пополнить <карту>", repeat_type="monthly",
+                                  repeat_config=json.dumps({"before_end": 2}))
+    msg = FakeMessage(1, text="📋 Мои напоминания")
+    await send(msg, fsm(1))
+    _, text, kwargs = msg.sent[0]
+    assert text == ("📆 <b>Напоминание</b>\n📝 Пополнить &lt;карту&gt;\n"
+                    f"🕐 {at:%d.%m.%Y %H:%M}\n🔄 Каждый месяц, за 2 дня до конца месяца")
+    assert kwargs.get("parse_mode") == "HTML"
+
+
+async def test_list_item_for_one_time_reminder(send, fsm):
+    uid = await make_user(1, tz="UTC")
+    at = (datetime.now(timezone.utc) + timedelta(days=1)).replace(second=0, microsecond=0)
+    await storage.create_reminder(uid, at, "к дерматологу")
+    msg = FakeMessage(1, text="📋 Мои напоминания")
+    await send(msg, fsm(1))
+    assert msg.sent[0][1] == f"📆 <b>Напоминание</b>\n📝 к дерматологу\n🕐 {at:%d.%m.%Y %H:%M}\n🔄 Однократно"

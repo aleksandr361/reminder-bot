@@ -208,3 +208,13 @@ async def test_flow_inline_keyboards_have_no_cancel_button():
         datas = [b.callback_data for row in markup.inline_keyboard for b in row]
         assert "cancel_flow" not in datas
         assert all("Отмена" not in b.text for row in markup.inline_keyboard for b in row)
+
+
+@pytest.mark.parametrize("repeat_type", ["once", "daily", "monthly"])
+async def test_snooze_keyboard_like_screenshot(repeat_type):
+    markup = kb.get_snooze_keyboard(7, repeat_type)
+    rows = [[(b.text, b.callback_data) for b in row] for row in markup.inline_keyboard]
+    assert rows == [
+        [("5 мин", "snooze_7_5"), ("15 мин", "snooze_7_15"), ("30 мин", "snooze_7_30"), ("1 час", "snooze_7_60")],
+        [("✅ Готово", "done_7")],
+    ]  # «Отменить серию» под сработавшим напоминанием больше нет

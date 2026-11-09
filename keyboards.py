@@ -33,7 +33,7 @@ MONTHS = [
 # Время на клавиатуре: с 08:00 до 23:00, по 4 в ряд
 TIME_PRESETS = [f"{hour:02d}:00" for hour in range(8, 24)]
 TIME_COLUMNS = 4
-SNOOZE_MINUTES = [(10, "10 мин"), (30, "30 мин"), (60, "1 час")]
+SNOOZE_MINUTES = [(5, "5 мин"), (15, "15 мин"), (30, "30 мин"), (60, "1 час")]
 # Частые значения N: «Каждые N часов», «Каждые N дней», «За N дней до конца месяца»
 INTERVAL_PRESETS = {
     "hourly": [1, 2, 3, 4, 6, 8, 12, 24],
@@ -186,14 +186,12 @@ def get_reminder_actions_inline(reminder_id: int, repeat_type: str = "once") -> 
 
 
 def get_snooze_keyboard(reminder_id: int, repeat_type: str = "once") -> InlineKeyboardMarkup:
-    """Кнопки под сработавшим напоминанием."""
-    rows = [
-        [_btn(f"⏰ {label}", f"snooze_{reminder_id}_{minutes}") for minutes, label in SNOOZE_MINUTES],
+    """Кнопки под сработавшим напоминанием: отложить и «Готово» (одинаково для разовых и серий;
+    отменить серию можно в «Мои напоминания»)."""
+    return _inline([
+        [_btn(label, f"snooze_{reminder_id}_{minutes}") for minutes, label in SNOOZE_MINUTES],
         [_btn("✅ Готово", f"done_{reminder_id}")],
-    ]
-    if repeat_type != "once":
-        rows.append([_btn("❌ Отменить серию", f"cancel_series_{reminder_id}")])
-    return _inline(rows)
+    ])
 
 
 def get_reminder_list_keyboard() -> InlineKeyboardMarkup:

@@ -21,7 +21,7 @@ from aiogram.exceptions import (
 
 from keyboards import get_snooze_keyboard
 from storage import get_due_reminders, set_reminder_run_at, update_reminder_status
-from texts import format_duration, month_days
+from texts import month_days
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ UTC = timezone.utc
 CHECK_INTERVAL = 10  # секунд
 MAX_MESSAGE_LEN = 4096  # лимит Telegram на длину сообщения
 MAX_CAPTION_LEN = 1024  # лимит Telegram на подпись к фото/файлу
-HEADER = "🔔 Напоминание"
+BELL = "🔔"  # сработавшее напоминание: «🔔» + текст; «✅ Готово» меняет его на «✅»
 # Вложения с подписью и без неё (кружок, стикер) — какой метод Bot их отправляет
 CAPTION_SENDERS = {
     "photo": "send_photo", "video": "send_video", "animation": "send_animation",
@@ -147,27 +147,18 @@ async def _send(bot, reminder: dict):
     text = reminder.get("text") or ""
     keyboard = get_snooze_keyboard(reminder["id"], reminder.get("repeat_type") or "once")
 
-    header = HEADER
-    snoozed = _config(reminder.get("repeat_config")).get("snoozed")
-    if snoozed:
-        try:
-            header += f" (отложено на {format_duration(int(snoozed))})"
-        except (TypeError, ValueError):
-            header += " (отложено)"
-
+    # Только колокольчик и само напоминание: «🔔Купить хлеб»
     if kind in CAPTION_SENDERS and file_id:
-        caption = f"{header}\n\n{text}" if text else header
         await getattr(bot, CAPTION_SENDERS[kind])(
-            chat_id, file_id, caption=caption[:MAX_CAPTION_LEN], parse_mode=None, reply_markup=keyboard
+            chat_id, file_id, caption=f"{BELL}{text}"[:MAX_CAPTION_LEN], parse_mode=None, reply_markup=keyboard
         )
     elif kind in NO_CAPTION_SENDERS and file_id:
-        # У кружков и стикеров нет подписи — кнопки отдельным сообщением
-        await getattr(bot, NO_CAPTION_SENDERS[kind])(chat_id, file_id)
-        await bot.send_message(chat_id, header, reply_markup=keyboard)
+        # У кружков и стикеров подписи нет — кнопки прямо под ними
+        await getattr(bot, NO_CAPTION_SENDERS[kind])(chat_id, file_id, reply_markup=keyboard)
     else:
         await bot.send_message(
             chat_id,
-            f"{header}\n\n📝 {text}"[:MAX_MESSAGE_LEN],
+            f"{BELL}{text}"[:MAX_MESSAGE_LEN],
             parse_mode=None,  # текст пользователя отправляем как есть
             reply_markup=keyboard,
         )

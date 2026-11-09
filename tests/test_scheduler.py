@@ -3,7 +3,6 @@ import json
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-import pytest
 
 from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
 from aiogram.methods import SendMessage
@@ -95,7 +94,8 @@ async def test_due_once_reminder_is_sent_and_marked_sent():
     assert chat_id == 77
     assert "купить хлеб" in text
     datas = [b.callback_data for row in kwargs["reply_markup"].inline_keyboard for b in row]
-    assert f"done_{rid}" in datas and f"snooze_{rid}_10" in datas
+    assert f"done_{rid}" in datas and f"snooze_{rid}_5" in datas
+    assert text == "🔔купить хлеб"  # только колокольчик и само напоминание
     assert (await storage.get_reminder_by_id(rid))["status"] == "sent"
 
 
@@ -302,7 +302,7 @@ async def test_photo_reminder_is_sent_as_photo_with_caption_and_buttons():
     assert bot.sent == []
     method, chat_id, file_id, kwargs = bot.media[0]
     assert (method, chat_id, file_id) == ("send_photo", 77, "photo-id")
-    assert "Напоминание" in kwargs["caption"] and "рецепт" in kwargs["caption"]
+    assert kwargs["caption"] == "🔔рецепт"
     datas = [b.callback_data for row in kwargs["reply_markup"].inline_keyboard for b in row]
     assert f"done_{rid}" in datas
     assert (await storage.get_reminder_by_id(rid))["status"] == "sent"
@@ -317,7 +317,7 @@ async def test_long_caption_is_trimmed_to_telegram_limit():
     assert len(bot.media[0][3]["caption"]) <= 1024
 
 
-async def test_sticker_is_sent_with_separate_message_for_buttons():
+async def test_sticker_gets_buttons_itself_without_extra_message():
     uid = await make_user(77)
     rid = await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), "",
                                         content_type="sticker", file_id="st")
@@ -326,10 +326,9 @@ async def test_sticker_is_sent_with_separate_message_for_buttons():
 
     assert bot.media[0][:3] == ("send_sticker", 77, "st")
     assert "caption" not in bot.media[0][3]
-    chat_id, text, kwargs = bot.sent[0]
-    assert "Напоминание" in text
-    datas = [b.callback_data for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    datas = [b.callback_data for row in bot.media[0][3]["reply_markup"].inline_keyboard for b in row]
     assert f"done_{rid}" in datas
+    assert bot.sent == []  # отдельного сообщения нет
 
 
 # ---------- Режимы «каждый месяц» по ТЗ ----------
@@ -377,16 +376,13 @@ def test_next_monthly_run_for_first_reminder():
 
 # ---------- Отложенные напоминания ----------
 
-@pytest.mark.parametrize("minutes,label", [(10, "10 минут"), (30, "30 минут"), (60, "1 час")])
-async def test_snoozed_reminder_says_it_was_snoozed(minutes, label):
+async def test_snoozed_reminder_comes_back_as_bell_and_text_only():
     uid = await make_user(77)
     await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), "купить хлеб",
-                                  repeat_config=json.dumps({"snoozed": minutes}))
+                                  repeat_config=json.dumps({"snoozed": 30}))
     bot = FakeBot()
     await scheduler.check_due_reminders(bot)
-    _, text, _ = bot.sent[0]
-    assert f"отложено на {label}" in text
-    assert "купить хлеб" in text
+    assert bot.sent[0][1] == "🔔купить хлеб"
 
 
 async def test_regular_reminder_has_no_snooze_note():
