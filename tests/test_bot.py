@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -540,3 +540,14 @@ async def test_list_item_for_one_time_reminder(send, fsm):
     msg = FakeMessage(1, text="📋 Мои напоминания")
     await send(msg, fsm(1))
     assert msg.sent[0][1] == f"📆 <b>Напоминание</b>\n📝 к дерматологу\n🕐 {at:%d.%m.%Y %H:%M}\n🔄 Однократно"
+
+
+# ---------- Даты как на скриншотах: месяц по-английски ----------
+
+@pytest.mark.parametrize("d,expected", [
+    (date(2026, 9, 16), "16 September 2026"),
+    (date(2026, 11, 8), "08 November 2026"),
+    (date(2027, 1, 1), "01 January 2027"),
+])
+def test_dates_use_english_month_like_screenshot(main_module, d, expected):
+    assert main_module.format_date(d) == expected

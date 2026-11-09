@@ -8,9 +8,10 @@ WEEKDAY_NAMES = {
     'mon': 'Пн', 'tue': 'Вт', 'wed': 'Ср',
     'thu': 'Чт', 'fri': 'Пт', 'sat': 'Сб', 'sun': 'Вс'
 }
-MONTHS_GENITIVE = [
-    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+# Месяц в датах сообщений — по-английски, как в образце: «16 September 2026»
+MONTHS = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
 ]
 # Типы повторения — как на кнопках меню
 REPEAT_LABELS = {
@@ -48,8 +49,8 @@ def plural(n: int, one: str, few: str, many: str) -> str:
 
 
 def format_date(d: date) -> str:
-    """08 ноября 2026"""
-    return f"{d.day:02d} {MONTHS_GENITIVE[d.month - 1]} {d.year}"
+    """08 November 2026"""
+    return f"{d.day:02d} {MONTHS[d.month - 1]} {d.year}"
 
 
 def format_duration(minutes: int) -> str:
