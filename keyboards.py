@@ -19,7 +19,7 @@ BTN_SETTINGS = "⚙️ Настройки"
 BTN_CANCEL = "❌ Отмена"
 BTN_CONFIRM = "✔ Подтвердить выбор"
 BTN_START_NOW = "📍 С текущего момента"
-# «❌ Отмена» кнопкой в сообщении была в одной из прошлых версий — main.py её ещё понимает
+# «❌ Отмена» кнопкой в сообщении — на шагах, где ответ даётся кнопками в сообщении
 CANCEL_DATA = "cancel_flow"
 
 WEEKDAYS = [
@@ -50,6 +50,11 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
 
 def _inline(rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[list(r) for r in rows])
+
+
+def _with_cancel(rows) -> InlineKeyboardMarkup:
+    """Кнопки шага и «❌ Отмена» последней строкой — всё в одном сообщении."""
+    return _inline(list(rows) + [[_btn(BTN_CANCEL, CANCEL_DATA)]])
 
 
 
@@ -97,7 +102,7 @@ def get_cancel_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_repeat_type_keyboard() -> InlineKeyboardMarkup:
-    return _inline([
+    return _with_cancel([
         [_btn("🗓 Однократно", "repeat_once")],
         [_btn("🔁 Каждые N часов", "repeat_hourly")],
         [_btn("🔁 Каждые N дней", "repeat_daily")],
@@ -118,11 +123,11 @@ def get_weekdays_keyboard(selected=None) -> InlineKeyboardMarkup:
         _btn(f"✅ {name}" if code in selected else name, f"weekday_{code}")
         for code, name in WEEKDAYS
     ]
-    return _inline([buttons[:4], buttons[4:], [_btn(BTN_CONFIRM, "weekday_done")]])
+    return _with_cancel([buttons[:4], buttons[4:], [_btn(BTN_CONFIRM, "weekday_done")]])
 
 
 def get_month_mode_keyboard() -> InlineKeyboardMarkup:
-    return _inline([
+    return _with_cancel([
         [_btn("📅 В указанные дни месяца", "monthmode_days")],
         [_btn("📆 В последний день месяца", "monthmode_last")],
         [_btn("⏳ За N дней до конца месяца", "monthmode_before")],
@@ -133,7 +138,7 @@ def get_month_days_keyboard(selected=None) -> InlineKeyboardMarkup:
     """Числа 1–31 (можно выбрать несколько) и «Подтвердить выбор»."""
     selected = set(selected or ())
     buttons = [_btn(f"✅{d}" if d in selected else str(d), f"mday_{d}") for d in range(1, 32)]
-    return _inline(_chunks(buttons, 7) + [[_btn(BTN_CONFIRM, "mday_done")]])
+    return _with_cancel(_chunks(buttons, 7) + [[_btn(BTN_CONFIRM, "mday_done")]])
 
 
 def get_time_keyboard(start_now: bool = False) -> ReplyKeyboardMarkup:
@@ -173,7 +178,7 @@ def get_calendar(year: int, month: int, chat_id, today: date | None = None) -> I
             _btn(day_text(day), f"date_{chat_id}_{year}_{month}_{day}") if day else _btn(" ", "ignore")
             for day in week
         ])
-    return _inline(rows)
+    return _with_cancel(rows)
 
 
 # ---------- Напоминания ----------

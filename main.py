@@ -257,16 +257,9 @@ async def send_settings(message: Message):
 
 # ---------- Шаги диалога ----------
 # Каждый шаг — одно сообщение: «[уже выбранное правило]» → «что сделать сейчас».
-# «❌ Отмена» всегда на нижней клавиатуре.
-#
-# Как Telegram показывает нижнюю клавиатуру: её задаёт последнее сообщение бота с клавиатурой,
-# и если это сообщение удалить — клавиатура пропадает. А в одном сообщении может быть либо
-# нижняя клавиатура, либо кнопки в сообщении. Поэтому на время диалога бот держит «шапку» —
-# сообщение «🆕 Новое напоминание» с клавиатурой «❌ Отмена». Шаги с кнопками в сообщении
-# (меню, календарь, дни недели, дни месяца) приходят одним сообщением, а «❌ Отмена» под ними — от шапки.
-# Шаги со своей клавиатурой (числа, время) несут её сами, «❌ Отмена» в ней последней строкой.
-# Шапка удаляется вместе с остальными вопросами, когда напоминание создано или отменено.
-HEADER = "🆕 Новое напоминание"
+# «❌ Отмена» — в этом же сообщении: последней кнопкой, если у шага кнопки в сообщении
+# (меню, календарь, дни недели, режим и дни месяца), иначе последней строкой нижней клавиатуры
+# (текст, числа, время). В одном сообщении Telegram может быть что-то одно из двух.
 
 async def remember_prompt(state: FSMContext, *messages: Message):
     """Запомнить вопросы бота, чтобы убрать их, когда пользователь ответит."""
@@ -275,49 +268,28 @@ async def remember_prompt(state: FSMContext, *messages: Message):
     await state.update_data(prompt_ids=list(dict.fromkeys(ids)))
 
 
-async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext, keep_ids=()):
-    """Удалить запомненные вопросы бота (кроме keep_ids). Если сообщение уже не удалить — не страшно."""
-    data = await state.get_data()
-    keep_ids = list(keep_ids)
-    old = [i for i in data.get('prompt_ids', []) if i not in keep_ids]
+async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext):
+    """Удалить запомненные вопросы бота. Если сообщение уже не удалить — не страшно."""
+    old = (await state.get_data()).get('prompt_ids', [])
     if old:
         try:
             await bot.delete_messages(chat_id, old)
         except TelegramAPIError as e:
             logging.debug("Не удалось удалить сообщения %s: %s", old, e)
-    await state.update_data(prompt_ids=keep_ids)
+    await state.update_data(prompt_ids=[])
 
 
 async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str, *,
                     inline=None, keyboard=None):
-    """Отправить шаг диалога и убрать вопросы предыдущего шага.
+    """Отправить шаг диалога одним сообщением и убрать вопросы предыдущего шага.
 
-    inline — кнопки в сообщении; keyboard — своя нижняя клавиатура шага (числа, время);
-    без них шаг просто текстом, а внизу остаётся «❌ Отмена».
+    inline — кнопки в сообщении (с «❌ Отмена»); keyboard — своя нижняя клавиатура шага (числа, время);
+    без них внизу только «❌ Отмена».
     """
-    data = await state.get_data()
-    header_id = data.get('header_id')
-    keyboard_from_header = header_id is not None and data.get('keyboard_from') == header_id
     text = f"{rule}\n\n{instruction}" if rule else instruction
-    sent = []
-
-    if keyboard is not None:
-        step = await message.answer(text, reply_markup=keyboard)
-        keyboard_from = step.message_id
-    else:
-        if not keyboard_from_header:
-            # Внизу сейчас другая клавиатура (главное меню, числа) — нужна шапка с «❌ Отмена»
-            header = await message.answer(HEADER, reply_markup=get_cancel_keyboard())
-            sent.append(header)
-            header_id = keyboard_from = header.message_id
-        else:
-            keyboard_from = header_id
-        step = await message.answer(text, reply_markup=inline)
-    sent.append(step)
-
-    await delete_prompts(bot, message.chat.id, state, keep_ids=[header_id] if header_id else [])
-    await remember_prompt(state, *sent)
-    await state.update_data(header_id=header_id, keyboard_from=keyboard_from)
+    step = await message.answer(text, reply_markup=inline or keyboard or get_cancel_keyboard())
+    await delete_prompts(bot, message.chat.id, state)
+    await remember_prompt(state, step)
 
 
 async def say_in_step(message: Message, state: FSMContext, text: str):

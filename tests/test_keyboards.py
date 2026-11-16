@@ -66,7 +66,7 @@ async def test_every_inline_button_reaches_its_handler(main_module, build, state
 async def test_repeat_type_keyboard_offers_all_types_one_per_row():
     markup = kb.get_repeat_type_keyboard()
     assert callbacks(markup) == [
-        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly"
+        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly", "cancel_flow"
     ]
     assert all(len(row) == 1 for row in markup.inline_keyboard)
 
@@ -86,7 +86,7 @@ async def test_interval_keyboard_is_reply_keyboard_with_numbers_and_cancel(kind)
 async def test_weekdays_keyboard_has_all_days_done_and_marks_selected():
     datas = callbacks(kb.get_weekdays_keyboard())
     assert set(datas) == {f"weekday_{d}" for d in
-                          ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]} | {"weekday_done"}
+                          ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]} | {"weekday_done", "cancel_flow"}
 
     def text_of(markup, data):
         return next(b.text for b in inline_buttons(markup) if b.callback_data == data)
@@ -201,13 +201,12 @@ async def test_time_keyboard_with_start_now_button():
     assert [t for row in rows[1:-1] for t in row] == [f"{h:02d}:00" for h in range(8, 24)]
 
 
-async def test_flow_inline_keyboards_have_no_cancel_button():
-    """При создании напоминания «❌ Отмена» — только на нижней клавиатуре."""
+async def test_flow_inline_keyboards_end_with_cancel():
+    """Шаги с кнопками в сообщении: «❌ Отмена» — последней кнопкой этого же сообщения."""
     for markup in [kb.get_repeat_type_keyboard(), kb.get_weekdays_keyboard(), kb.get_month_mode_keyboard(),
                    kb.get_month_days_keyboard(), kb.get_calendar(2026, 11, 7)]:
-        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
-        assert "cancel_flow" not in datas
-        assert all("Отмена" not in b.text for row in markup.inline_keyboard for b in row)
+        last_row = markup.inline_keyboard[-1]
+        assert [(b.text, b.callback_data) for b in last_row] == [("❌ Отмена", "cancel_flow")]
 
 
 @pytest.mark.parametrize("repeat_type", ["once", "daily", "monthly"])

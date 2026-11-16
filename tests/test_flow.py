@@ -37,9 +37,14 @@ def markup_of(msg):
 
 
 def shows_cancel(messages):
-    """Среди ответов бота есть нижняя клавиатура с «❌ Отмена»."""
-    return any(isinstance(markup_of(m), ReplyKeyboardMarkup)
-               and [CANCEL] in reply_rows(markup_of(m)) for m in messages)
+    """Среди ответов бота есть «❌ Отмена» — на нижней клавиатуре или кнопкой в сообщении."""
+    for m in messages:
+        markup = markup_of(m)
+        if isinstance(markup, ReplyKeyboardMarkup) and [CANCEL] in reply_rows(markup):
+            return True
+        if isinstance(markup, InlineKeyboardMarkup) and "cancel_flow" in inline_datas(markup):
+            return True
+    return False
 
 
 def visible_keyboard(bot, messages):
@@ -114,15 +119,13 @@ async def test_menu_has_five_types_and_cancel_keyboard(send, fsm):
     await make_user(1, tz="UTC")
     start = await open_menu(send, fsm(1))
 
-    header, menu = start.answered  # шапка с «❌ Отмена» на клавиатуре и меню с кнопками
-    assert header.text == "🆕 Новое напоминание"
-    assert reply_rows(markup_of(header)) == [[CANCEL]]
+    [menu] = start.answered  # одно сообщение, без «🆕 Новое напоминание»
     assert menu.text == "Выберите тип повторения:"
     assert inline_datas(markup_of(menu)) == [
-        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly"
+        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly", "cancel_flow"
     ]
     assert inline_texts(markup_of(menu)) == [
-        "🗓 Однократно", "🔁 Каждые N часов", "🔁 Каждые N дней", "📆 Каждую неделю", "📆 Каждый месяц"
+        "🗓 Однократно", "🔁 Каждые N часов", "🔁 Каждые N дней", "📆 Каждую неделю", "📆 Каждый месяц", CANCEL
     ]
     assert all(len(row) == 1 for row in markup_of(menu).inline_keyboard)
 
@@ -134,7 +137,7 @@ async def test_after_type_bot_asks_content_with_rule(send, press, fsm, main_modu
     prompt = await choose_type(press, state, start.answered[-1], "once")
 
     assert prompt.text == "🗓 Однократно\n\nОтправьте текст или вложение для напоминания:"
-    assert markup_of(prompt) is None  # нижняя клавиатура «❌ Отмена» остаётся от шапки
+    assert reply_rows(markup_of(prompt)) == [[CANCEL]]
     assert await state.get_state() == main_module.ReminderFlow.waiting_for_text.state
 
 
@@ -320,9 +323,9 @@ async def test_month_mode_step(send, press, fsm):
     mode_msg = content.answered[-1]
     assert step_text(content) == "📆 Каждый месяц\n\nКак напоминать каждый месяц?"
     assert len(content.answered) == 1
-    assert inline_datas(markup_of(mode_msg)) == ["monthmode_days", "monthmode_last", "monthmode_before"]
+    assert inline_datas(markup_of(mode_msg)) == ["monthmode_days", "monthmode_last", "monthmode_before", "cancel_flow"]
     assert inline_texts(markup_of(mode_msg)) == [
-        "📅 В указанные дни месяца", "📆 В последний день месяца", "⏳ За N дней до конца месяца"
+        "📅 В указанные дни месяца", "📆 В последний день месяца", "⏳ За N дней до конца месяца", CANCEL
     ]
 
 
@@ -352,8 +355,8 @@ async def test_month_days_flow(send, press, fsm, main_module):
         "напоминание придёт в последний день этого месяца."
     )
     datas = inline_datas(markup_of(days_msg))
-    assert datas == [f"mday_{d}" for d in range(1, 32)] + ["mday_done"]
-    assert inline_texts(markup_of(days_msg))[-1] == "✔ Подтвердить выбор"
+    assert datas == [f"mday_{d}" for d in range(1, 32)] + ["mday_done", "cancel_flow"]
+    assert inline_texts(markup_of(days_msg))[-2:] == ["✔ Подтвердить выбор", CANCEL]
 
     for data in ["mday_29", "mday_5", "mday_done"]:
         await press(FakeCallback(data, days_msg), state)
@@ -508,7 +511,7 @@ async def test_weekly_flow(send, press, fsm, main_module):
     days_msg = content.answered[-1]
     assert step_text(content) == ("📆 Каждую неделю\n\nВыберите дни недели.\nМожно выбрать несколько дней.\n"
                                   "Когда закончите — нажмите «Подтвердить выбор».")
-    assert inline_texts(markup_of(days_msg))[-1] == "✔ Подтвердить выбор"
+    assert inline_texts(markup_of(days_msg))[-2:] == ["✔ Подтвердить выбор", CANCEL]
 
     for data in ["weekday_wed", "weekday_mon", "weekday_done"]:
         await press(FakeCallback(data, days_msg), state)
@@ -530,7 +533,7 @@ async def test_text_outside_flow_starts_reminder(send, press, fsm, main_module):
     state = fsm(1)
     msg = await say(send, state, "Купить хлеб")
 
-    assert [m.text for m in msg.answered] == ["🆕 Новое напоминание", "Купить хлеб\n\nВыберите тип повторения:"]
+    assert [m.text for m in msg.answered] == ["Купить хлеб\n\nВыберите тип повторения:"]
     assert shows_cancel(msg.answered)
     assert await state.get_state() == main_module.ReminderFlow.waiting_for_repeat_type.state
 
@@ -764,10 +767,9 @@ async def test_previous_question_disappears_right_after_choice(send, press, fsm,
     await make_user(1, tz="UTC")
     state = fsm(1)
     start = await open_menu(send, state)
-    header, menu = start.answered
+    [menu] = start.answered
     await choose_type(press, state, menu, "once")
     assert menu.message_id in deleted_ids(bot)  # меню типов исчезло
-    assert header.message_id not in deleted_ids(bot)  # шапка держит клавиатуру «❌ Отмена»
 
     content = await say(send, state, "x")
     text_prompt = start.answered[-1].answered[-1]
@@ -893,13 +895,19 @@ async def walk(send, press, state, repeat, after_each):
 
 
 @pytest.mark.parametrize("repeat", ["once", "hourly", "daily", "weekly", "monthly"])
-async def test_cancel_is_always_on_keyboard(send, press, fsm, bot, repeat):
+async def test_cancel_is_always_available(send, press, fsm, bot, repeat):
+    """На каждом шаге есть «❌ Отмена»: кнопкой в текущем сообщении или на нижней клавиатуре."""
     await make_user(1, tz="UTC")
     state = fsm(1)
 
     async def check(users):
+        alive = [m for m in bot_messages(*users) if m.message_id not in deleted_ids(bot)]
+        current = max(alive, key=lambda m: m.message_id)
+        markup = markup_of(current)
+        in_message = isinstance(markup, InlineKeyboardMarkup) and inline_datas(markup)[-1] == "cancel_flow"
         keyboard = visible_keyboard(bot, bot_messages(*users))
-        assert keyboard and keyboard[-1] == [CANCEL], keyboard
+        on_keyboard = bool(keyboard) and keyboard[-1] == [CANCEL]
+        assert in_message or on_keyboard, (current.text, keyboard)
 
     users, confirmation = await walk(send, press, state, repeat, check)
     assert "Напоминание установлено" in confirmation.text
@@ -907,25 +915,23 @@ async def test_cancel_is_always_on_keyboard(send, press, fsm, bot, repeat):
 
 
 @pytest.mark.parametrize("repeat", ["once", "hourly", "daily", "weekly", "monthly"])
-async def test_no_cancel_buttons_inside_messages(send, press, fsm, bot, repeat):
+async def test_no_new_reminder_header_message(send, press, fsm, repeat):
     await make_user(1, tz="UTC")
 
     async def nothing(users):
         pass
 
     users, _ = await walk(send, press, fsm(1), repeat, nothing)
-    for m in bot_messages(*users):
-        if isinstance(markup_of(m), InlineKeyboardMarkup):
-            assert "cancel_flow" not in inline_datas(markup_of(m))
+    assert all("🆕" not in (m.text or "") for m in bot_messages(*users))
 
 
 @pytest.mark.parametrize("repeat,expected", [
-    # меню (шапка + меню), тип, текст, …, итог
-    ("once", [2, 1, 1, 1, 1]),
-    ("hourly", [2, 1, 1, 1, 1]),
-    ("daily", [2, 1, 1, 2, 1, 1]),   # после числа дней — снова шапка с «❌ Отмена» и календарь
-    ("weekly", [2, 1, 1, 0, 1, 1]),  # отметка дня меняет то же сообщение
-    ("monthly", [2, 1, 1, 1, 0, 1, 1]),
+    # меню, тип, текст, …, итог — каждый шаг одним сообщением
+    ("once", [1, 1, 1, 1, 1]),
+    ("hourly", [1, 1, 1, 1, 1]),
+    ("daily", [1, 1, 1, 1, 1, 1]),
+    ("weekly", [1, 1, 1, 0, 1, 1]),  # отметка дня меняет то же сообщение
+    ("monthly", [1, 1, 1, 1, 0, 1, 1]),
 ])
 async def test_messages_per_step(send, press, fsm, repeat, expected):
     await make_user(1, tz="UTC")
@@ -941,7 +947,7 @@ async def test_messages_per_step(send, press, fsm, repeat, expected):
     assert counts == expected
 
 
-async def test_cancel_button_from_previous_version_still_works(send, press, fsm, bot):
+async def test_inline_cancel_button_cancels_flow(send, press, fsm, bot):
     await make_user(1, tz="UTC")
     state = fsm(1)
     content = await flow_to_content(send, press, state, "once")
