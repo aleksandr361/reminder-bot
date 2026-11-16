@@ -122,10 +122,10 @@ async def test_menu_has_five_types_and_cancel_keyboard(send, fsm):
     [menu] = start.answered  # одно сообщение, без «🆕 Новое напоминание»
     assert menu.text == "Выберите тип повторения:"
     assert inline_datas(markup_of(menu)) == [
-        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly", "cancel_flow"
+        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly"
     ]
     assert inline_texts(markup_of(menu)) == [
-        "🗓 Однократно", "🔁 Каждые N часов", "🔁 Каждые N дней", "📆 Каждую неделю", "📆 Каждый месяц", CANCEL
+        "🗓 Однократно", "🔁 Каждые N часов", "🔁 Каждые N дней", "📆 Каждую неделю", "📆 Каждый месяц"
     ]
     assert all(len(row) == 1 for row in markup_of(menu).inline_keyboard)
 
@@ -137,7 +137,7 @@ async def test_after_type_bot_asks_content_with_rule(send, press, fsm, main_modu
     prompt = await choose_type(press, state, start.answered[-1], "once")
 
     assert prompt.text == "🗓 Однократно\n\nОтправьте текст или вложение для напоминания:"
-    assert reply_rows(markup_of(prompt)) == [[CANCEL]]
+    assert markup_of(prompt) is None  # нижнюю клавиатуру (с «❌ Отмена») шаг не меняет
     assert await state.get_state() == main_module.ReminderFlow.waiting_for_text.state
 
 
@@ -179,12 +179,14 @@ async def test_cancel_works_on_any_step(send, press, fsm, steps):
     assert await all_reminders() == []
 
 
-async def test_cancel_outside_flow_just_shows_menu(send, fsm):
+async def test_cancel_outside_flow_is_silent(send, fsm, bot):
+    """Вне создания напоминания «❌ Отмена» ничего не делает — нажатие тихо убирается из чата."""
     await make_user(1, tz="UTC")
     state = fsm(1)
     cancel = await say(send, state, CANCEL)
     assert await state.get_state() is None
-    assert ["➕ Новое напоминание"] in reply_rows(markup_of(cancel.answered[-1]))
+    assert cancel.answered == []
+    assert cancel.message_id in deleted_ids(bot)
 
 
 # ---------- 3. Каждые N часов ----------
@@ -196,7 +198,8 @@ async def test_hours_number_step(send, press, fsm):
 
     assert prompt.text == ("🔁 Каждые N часов\n\nКак часто напоминать?\n"
                            "Выберите количество часов из предложенных ниже или введите своё число.")
-    assert reply_rows(markup_of(prompt)) == [["1", "2", "3", "4"], ["6", "8", "12", "24"], [CANCEL]]
+    assert inline_texts(markup_of(prompt)) == ["1", "2", "3", "4", "6", "8", "12", "24"]
+    assert inline_datas(markup_of(prompt)) == [f"num_{n}" for n in (1, 2, 3, 4, 6, 8, 12, 24)]
 
 
 async def test_hours_start_step(send, press, fsm):
@@ -270,7 +273,7 @@ async def test_days_number_step(send, press, fsm):
     prompt = content.answered[-1]
     assert prompt.text == ("🔁 Каждые N дней\n\nКак часто напоминать?\n"
                            "Выберите количество дней из предложенных ниже или введите своё число.")
-    assert reply_rows(markup_of(prompt)) == [["1", "2", "3", "7"], ["10", "14", "21", "30"], [CANCEL]]
+    assert inline_texts(markup_of(prompt)) == ["1", "2", "3", "7", "10", "14", "21", "30"]
 
 
 async def test_days_full_flow(send, press, fsm, main_module):
@@ -281,7 +284,6 @@ async def test_days_full_flow(send, press, fsm, main_module):
 
     assert n.answered[-1].text == "🔁 Каждые 7 дней\n\nВыберите дату начала:"
     assert any(d.startswith("date_") for d in inline_datas(markup_of(n.answered[-1])))
-    assert shows_cancel(n.answered)
 
     day = tomorrow_utc()
     await press(FakeCallback(f"date_1_{day.year}_{day.month}_{day.day}", n.answered[-1]), state)
@@ -323,9 +325,9 @@ async def test_month_mode_step(send, press, fsm):
     mode_msg = content.answered[-1]
     assert step_text(content) == "📆 Каждый месяц\n\nКак напоминать каждый месяц?"
     assert len(content.answered) == 1
-    assert inline_datas(markup_of(mode_msg)) == ["monthmode_days", "monthmode_last", "monthmode_before", "cancel_flow"]
+    assert inline_datas(markup_of(mode_msg)) == ["monthmode_days", "monthmode_last", "monthmode_before"]
     assert inline_texts(markup_of(mode_msg)) == [
-        "📅 В указанные дни месяца", "📆 В последний день месяца", "⏳ За N дней до конца месяца", CANCEL
+        "📅 В указанные дни месяца", "📆 В последний день месяца", "⏳ За N дней до конца месяца"
     ]
 
 
@@ -355,8 +357,8 @@ async def test_month_days_flow(send, press, fsm, main_module):
         "напоминание придёт в последний день этого месяца."
     )
     datas = inline_datas(markup_of(days_msg))
-    assert datas == [f"mday_{d}" for d in range(1, 32)] + ["mday_done", "cancel_flow"]
-    assert inline_texts(markup_of(days_msg))[-2:] == ["✔ Подтвердить выбор", CANCEL]
+    assert datas == [f"mday_{d}" for d in range(1, 32)] + ["mday_done"]
+    assert inline_texts(markup_of(days_msg))[-1] == "✔ Подтвердить выбор"
 
     for data in ["mday_29", "mday_5", "mday_done"]:
         await press(FakeCallback(data, days_msg), state)
@@ -423,7 +425,7 @@ async def test_month_before_end_flow(send, press, fsm, main_module):
     ask_n = mode_msg.answered[-1]
     assert ask_n.text == ("📆 Каждый месяц\n\nЗа сколько дней до конца месяца напоминать?\n"
                           "Выберите число ниже или введите своё.")
-    assert reply_rows(markup_of(ask_n)) == [["1", "2", "3", "5"], ["7", "10", "14"], [CANCEL]]
+    assert inline_texts(markup_of(ask_n)) == ["1", "2", "3", "5", "7", "10", "14"]
 
     n = await say(send, state, "3")
     assert n.answered[-1].text == f"📆 Каждый месяц, за 3 дня до конца месяца\n\n{TIME_INSTRUCTION}"
@@ -511,7 +513,7 @@ async def test_weekly_flow(send, press, fsm, main_module):
     days_msg = content.answered[-1]
     assert step_text(content) == ("📆 Каждую неделю\n\nВыберите дни недели.\nМожно выбрать несколько дней.\n"
                                   "Когда закончите — нажмите «Подтвердить выбор».")
-    assert inline_texts(markup_of(days_msg))[-2:] == ["✔ Подтвердить выбор", CANCEL]
+    assert inline_texts(markup_of(days_msg))[-1] == "✔ Подтвердить выбор"
 
     for data in ["weekday_wed", "weekday_mon", "weekday_done"]:
         await press(FakeCallback(data, days_msg), state)
@@ -534,7 +536,6 @@ async def test_text_outside_flow_starts_reminder(send, press, fsm, main_module):
     msg = await say(send, state, "Купить хлеб")
 
     assert [m.text for m in msg.answered] == ["Купить хлеб\n\nВыберите тип повторения:"]
-    assert shows_cancel(msg.answered)
     assert await state.get_state() == main_module.ReminderFlow.waiting_for_repeat_type.state
 
     # Текст уже есть — после выбора типа сразу следующий шаг
@@ -895,23 +896,24 @@ async def walk(send, press, state, repeat, after_each):
 
 
 @pytest.mark.parametrize("repeat", ["once", "hourly", "daily", "weekly", "monthly"])
-async def test_cancel_is_always_available(send, press, fsm, bot, repeat):
-    """На каждом шаге есть «❌ Отмена»: кнопкой в текущем сообщении или на нижней клавиатуре."""
+async def test_cancel_is_always_on_keyboard(send, press, fsm, bot, main_module, repeat):
+    """На каждом шаге «❌ Отмена» видна на нижней клавиатуре, а сообщение шага — одно и без неё внутри.
+    Клавиатуру с «❌ Отмена» держит постоянное меню (здесь его ставит /start)."""
     await make_user(1, tz="UTC")
     state = fsm(1)
+    start_msg = FakeMessage(1, text="/start")
+    await main_module.cmd_start(start_msg, state)
 
     async def check(users):
-        alive = [m for m in bot_messages(*users) if m.message_id not in deleted_ids(bot)]
-        current = max(alive, key=lambda m: m.message_id)
-        markup = markup_of(current)
-        in_message = isinstance(markup, InlineKeyboardMarkup) and inline_datas(markup)[-1] == "cancel_flow"
-        keyboard = visible_keyboard(bot, bot_messages(*users))
-        on_keyboard = bool(keyboard) and keyboard[-1] == [CANCEL]
-        assert in_message or on_keyboard, (current.text, keyboard)
+        keyboard = visible_keyboard(bot, bot_messages(start_msg, *users))
+        assert keyboard and [CANCEL] in keyboard, keyboard
+        for m in bot_messages(*users):
+            if isinstance(markup_of(m), InlineKeyboardMarkup):
+                assert "cancel_flow" not in inline_datas(markup_of(m))
 
     users, confirmation = await walk(send, press, state, repeat, check)
     assert "Напоминание установлено" in confirmation.text
-    assert ["➕ Новое напоминание"] in visible_keyboard(bot, bot_messages(*users))
+    assert ["➕ Новое напоминание"] in visible_keyboard(bot, bot_messages(start_msg, *users))
 
 
 @pytest.mark.parametrize("repeat", ["once", "hourly", "daily", "weekly", "monthly"])
@@ -989,3 +991,35 @@ async def test_confirmation_is_bold_html_and_escapes_text(send, press, fsm, main
     assert done.kwargs.get("parse_mode") == "HTML"
     assert done.text == ("✅ <b>Напоминание установлено</b>\n📝 &lt;купить&gt; &amp; хлеб\n🗓 Однократно\n"
                          f"🕰 {fmt(main_module, day)} в 21:00")
+
+
+# ---------- Число N кнопкой в сообщении ----------
+
+async def test_hours_number_can_be_tapped(send, press, fsm):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    content = await flow_to_content(send, press, state, "hourly")
+    numbers_msg = content.answered[-1]
+    await press(FakeCallback("num_3", numbers_msg), state)
+    assert numbers_msg.answered[-1].text.startswith("🔁 Каждые 3 часа")
+
+
+async def test_days_number_can_be_tapped_then_calendar(send, press, fsm, main_module):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    content = await flow_to_content(send, press, state, "daily")
+    numbers_msg = content.answered[-1]
+    await press(FakeCallback("num_7", numbers_msg), state)
+    calendar_msg = numbers_msg.answered[-1]
+    assert calendar_msg.text == "🔁 Каждые 7 дней\n\nВыберите дату начала:"
+    assert await state.get_state() == main_module.ReminderFlow.waiting_for_date.state
+
+
+async def test_month_before_end_number_can_be_tapped(send, press, fsm):
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    content = await flow_to_content(send, press, state, "monthly")
+    await press(FakeCallback("monthmode_before", content.answered[-1]), state)
+    numbers_msg = content.answered[-1].answered[-1]
+    await press(FakeCallback("num_3", numbers_msg), state)
+    assert numbers_msg.answered[-1].text.startswith("📆 Каждый месяц, за 3 дня до конца месяца")

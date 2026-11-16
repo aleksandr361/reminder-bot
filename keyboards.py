@@ -15,11 +15,11 @@ from aiogram.types import (
 BTN_NEW = "➕ Новое напоминание"
 BTN_LIST = "📋 Мои напоминания"
 BTN_SETTINGS = "⚙️ Настройки"
-# Во время создания напоминания эта кнопка всегда внизу
+# «❌ Отмена» всегда на нижней клавиатуре: в главном меню и на клавиатуре времени
 BTN_CANCEL = "❌ Отмена"
 BTN_CONFIRM = "✔ Подтвердить выбор"
 BTN_START_NOW = "📍 С текущего момента"
-# «❌ Отмена» кнопкой в сообщении — на шагах, где ответ даётся кнопками в сообщении
+# «❌ Отмена» кнопкой в сообщении была в одной из прошлых версий — main.py её ещё понимает
 CANCEL_DATA = "cancel_flow"
 
 WEEKDAYS = [
@@ -52,10 +52,6 @@ def _inline(rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[list(r) for r in rows])
 
 
-def _with_cancel(rows) -> InlineKeyboardMarkup:
-    """Кнопки шага и «❌ Отмена» последней строкой — всё в одном сообщении."""
-    return _inline(list(rows) + [[_btn(BTN_CANCEL, CANCEL_DATA)]])
-
 
 
 def _chunks(items, size):
@@ -75,6 +71,8 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=BTN_NEW)],
             [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_SETTINGS)],
+            # Постоянно внизу: на шагах с кнопками в сообщении отмена берётся отсюда
+            [KeyboardButton(text=BTN_CANCEL)],
         ],
         resize_keyboard=True,
     )
@@ -102,7 +100,7 @@ def get_cancel_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_repeat_type_keyboard() -> InlineKeyboardMarkup:
-    return _with_cancel([
+    return _inline([
         [_btn("🗓 Однократно", "repeat_once")],
         [_btn("🔁 Каждые N часов", "repeat_hourly")],
         [_btn("🔁 Каждые N дней", "repeat_daily")],
@@ -111,10 +109,10 @@ def get_repeat_type_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def get_interval_keyboard(kind: str) -> ReplyKeyboardMarkup:
-    """Числа для «Каждые N часов» (hourly), «Каждые N дней» (daily), «За N дней до конца месяца» (before_end).
-    Любое другое число можно напечатать."""
-    return _reply([str(n) for n in INTERVAL_PRESETS[kind]], 4, "Или введите своё число")
+def get_interval_keyboard(kind: str) -> InlineKeyboardMarkup:
+    """Числа для «Каждые N часов» (hourly), «Каждые N дней» (daily), «За N дней до конца месяца» (before_end) —
+    кнопками в сообщении, чтобы внизу оставалась клавиатура с «❌ Отмена». Любое другое число можно напечатать."""
+    return _inline(_chunks([_btn(str(n), f"num_{n}") for n in INTERVAL_PRESETS[kind]], 4))
 
 
 def get_weekdays_keyboard(selected=None) -> InlineKeyboardMarkup:
@@ -123,11 +121,11 @@ def get_weekdays_keyboard(selected=None) -> InlineKeyboardMarkup:
         _btn(f"✅ {name}" if code in selected else name, f"weekday_{code}")
         for code, name in WEEKDAYS
     ]
-    return _with_cancel([buttons[:4], buttons[4:], [_btn(BTN_CONFIRM, "weekday_done")]])
+    return _inline([buttons[:4], buttons[4:], [_btn(BTN_CONFIRM, "weekday_done")]])
 
 
 def get_month_mode_keyboard() -> InlineKeyboardMarkup:
-    return _with_cancel([
+    return _inline([
         [_btn("📅 В указанные дни месяца", "monthmode_days")],
         [_btn("📆 В последний день месяца", "monthmode_last")],
         [_btn("⏳ За N дней до конца месяца", "monthmode_before")],
@@ -138,7 +136,7 @@ def get_month_days_keyboard(selected=None) -> InlineKeyboardMarkup:
     """Числа 1–31 (можно выбрать несколько) и «Подтвердить выбор»."""
     selected = set(selected or ())
     buttons = [_btn(f"✅{d}" if d in selected else str(d), f"mday_{d}") for d in range(1, 32)]
-    return _with_cancel(_chunks(buttons, 7) + [[_btn(BTN_CONFIRM, "mday_done")]])
+    return _inline(_chunks(buttons, 7) + [[_btn(BTN_CONFIRM, "mday_done")]])
 
 
 def get_time_keyboard(start_now: bool = False) -> ReplyKeyboardMarkup:
@@ -178,7 +176,7 @@ def get_calendar(year: int, month: int, chat_id, today: date | None = None) -> I
             _btn(day_text(day), f"date_{chat_id}_{year}_{month}_{day}") if day else _btn(" ", "ignore")
             for day in week
         ])
-    return _with_cancel(rows)
+    return _inline(rows)
 
 
 # ---------- Напоминания ----------

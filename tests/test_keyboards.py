@@ -40,6 +40,9 @@ KEYBOARD_CASES = [
     (lambda: kb.get_weekdays_keyboard({"mon", "sun"}), "waiting_for_weekdays", {"weekday_toggle", "cancel_flow_button"}),
     (lambda: kb.get_calendar(2026, 11, -1001234567890), "waiting_for_date",
      {"calendar_nav", "date_selected", "ignore_callback", "cancel_flow_button"}),
+    (lambda: kb.get_interval_keyboard("hourly"), "waiting_for_interval", {"number_chosen"}),
+    (lambda: kb.get_interval_keyboard("daily"), "waiting_for_interval", {"number_chosen"}),
+    (lambda: kb.get_interval_keyboard("before_end"), "waiting_for_month_offset", {"number_chosen"}),
     (lambda: kb.get_reminder_actions_inline(5, "once"), None, {"cancel_single_reminder"}),
     (lambda: kb.get_reminder_actions_inline(5, "daily"), None, {"cancel_series_reminder"}),
     (lambda: kb.get_snooze_keyboard(5, "once"), None, {"snooze_reminder", "done_reminder"}),
@@ -66,27 +69,27 @@ async def test_every_inline_button_reaches_its_handler(main_module, build, state
 async def test_repeat_type_keyboard_offers_all_types_one_per_row():
     markup = kb.get_repeat_type_keyboard()
     assert callbacks(markup) == [
-        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly", "cancel_flow"
+        "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly"
     ]
     assert all(len(row) == 1 for row in markup.inline_keyboard)
 
 
-@pytest.mark.parametrize("kind", ["hourly", "daily", "before_end"])
-async def test_interval_keyboard_is_reply_keyboard_with_numbers_and_cancel(kind):
+@pytest.mark.parametrize("kind,numbers", [
+    ("hourly", [1, 2, 3, 4, 6, 8, 12, 24]),
+    ("daily", [1, 2, 3, 7, 10, 14, 21, 30]),
+    ("before_end", [1, 2, 3, 5, 7, 10, 14]),
+])
+async def test_interval_keyboard_is_numbers_in_message(kind, numbers):
     markup = kb.get_interval_keyboard(kind)
-    assert isinstance(markup, ReplyKeyboardMarkup)
-    rows = [[b.text for b in row] for row in markup.keyboard]
-    assert rows[-1] == ["❌ Отмена"]
-    numbers = [t for row in rows[:-1] for t in row]
-    assert numbers and all(t.isdigit() and int(t) >= 1 for t in numbers)
-    assert numbers[0] == "1"
-    assert markup.input_field_placeholder and "число" in markup.input_field_placeholder.lower()
+    assert isinstance(markup, InlineKeyboardMarkup)  # кнопки в сообщении — нижняя клавиатура не меняется
+    assert [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row] == \
+        [(str(n), f"num_{n}") for n in numbers]
 
 
 async def test_weekdays_keyboard_has_all_days_done_and_marks_selected():
     datas = callbacks(kb.get_weekdays_keyboard())
     assert set(datas) == {f"weekday_{d}" for d in
-                          ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]} | {"weekday_done", "cancel_flow"}
+                          ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]} | {"weekday_done"}
 
     def text_of(markup, data):
         return next(b.text for b in inline_buttons(markup) if b.callback_data == data)
@@ -146,13 +149,16 @@ async def test_main_menu_buttons_reach_main_handlers(main_module, send, fsm):
     await make_user(1)
     markup = kb.get_main_menu_keyboard()
     assert isinstance(markup, ReplyKeyboardMarkup)
-    texts = [b.text for row in markup.keyboard for b in row]
-    assert len(texts) == 3
+    rows = [[b.text for b in row] for row in markup.keyboard]
+    assert rows[-1] == ["❌ Отмена"]  # «❌ Отмена» всегда на клавиатуре
+    texts = [t for row in rows for t in row]
+    assert len(texts) == 4
     for text in texts:
         msg = FakeMessage(1, text=text)
         result = await send(msg, fsm(1))
         assert result is not UNHANDLED, text
-        assert msg.sent, text
+        if text != "❌ Отмена":  # вне создания напоминания отмена молча убирается
+            assert msg.sent, text
 
 
 async def test_geo_button_requests_location():
@@ -201,12 +207,12 @@ async def test_time_keyboard_with_start_now_button():
     assert [t for row in rows[1:-1] for t in row] == [f"{h:02d}:00" for h in range(8, 24)]
 
 
-async def test_flow_inline_keyboards_end_with_cancel():
-    """Шаги с кнопками в сообщении: «❌ Отмена» — последней кнопкой этого же сообщения."""
+async def test_flow_inline_keyboards_have_no_cancel_button():
+    """«❌ Отмена» — на нижней клавиатуре, а не кнопкой в сообщении."""
     for markup in [kb.get_repeat_type_keyboard(), kb.get_weekdays_keyboard(), kb.get_month_mode_keyboard(),
-                   kb.get_month_days_keyboard(), kb.get_calendar(2026, 11, 7)]:
-        last_row = markup.inline_keyboard[-1]
-        assert [(b.text, b.callback_data) for b in last_row] == [("❌ Отмена", "cancel_flow")]
+                   kb.get_month_days_keyboard(), kb.get_calendar(2026, 11, 7), kb.get_interval_keyboard("daily")]:
+        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+        assert "cancel_flow" not in datas
 
 
 @pytest.mark.parametrize("repeat_type", ["once", "daily", "monthly"])

@@ -36,7 +36,6 @@ from keyboards import (
     get_repeat_type_keyboard,
     get_weekdays_keyboard,
     get_interval_keyboard,
-    get_cancel_keyboard,
     get_month_mode_keyboard,
     get_month_days_keyboard,
     get_reminder_actions_inline,
@@ -70,7 +69,7 @@ REPEAT_TYPES = tuple(REPEAT_LABELS)
 NUMBER_LIMITS = {'hourly': 168, 'daily': 365, 'before_end': 27}
 # Кнопки шагов создания напоминания: работают только пока идёт диалог
 # ("time_" — кнопки времени из старых версий бота)
-FLOW_BUTTON_PREFIXES = ("repeat_", "weekday_", "cal_", "date_", "time_", "monthmode_", "mday_", "start_now")
+FLOW_BUTTON_PREFIXES = ("repeat_", "weekday_", "cal_", "date_", "time_", "monthmode_", "mday_", "start_now", "num_")
 NOT_FOUND = "❌ Напоминание не найдено"
 TIME_EXAMPLE = "(например: 1015)"
 TIME_STEP = f"Во сколько напоминать?\nВыберите время ниже или введите вручную {TIME_EXAMPLE}."
@@ -257,9 +256,14 @@ async def send_settings(message: Message):
 
 # ---------- Шаги диалога ----------
 # Каждый шаг — одно сообщение: «[уже выбранное правило]» → «что сделать сейчас».
-# «❌ Отмена» — в этом же сообщении: последней кнопкой, если у шага кнопки в сообщении
-# (меню, календарь, дни недели, режим и дни месяца), иначе последней строкой нижней клавиатуры
-# (текст, числа, время). В одном сообщении Telegram может быть что-то одно из двух.
+#
+# «❌ Отмена» всегда на нижней клавиатуре. Нижнюю клавиатуру в Telegram задаёт последнее сообщение
+# бота с клавиатурой, и если его удалить — она пропадает; а сообщение с кнопками внутри своей
+# нижней клавиатуры нести не может. Поэтому «❌ Отмена» — постоянная кнопка главного меню, которое
+# держат итоговые сообщения («✅ Напоминание установлено», /start и т.п.): их бот не удаляет.
+# Шаги с кнопками в сообщении (меню, числа, календарь, дни недели, режим и дни месяца) и шаг текста
+# нижнюю клавиатуру не меняют. Свою клавиатуру (часы и «❌ Отмена») приносит только шаг времени —
+# последний, после него главное меню возвращается с итоговым сообщением.
 
 async def remember_prompt(state: FSMContext, *messages: Message):
     """Запомнить вопросы бота, чтобы убрать их, когда пользователь ответит."""
@@ -283,11 +287,11 @@ async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, in
                     inline=None, keyboard=None):
     """Отправить шаг диалога одним сообщением и убрать вопросы предыдущего шага.
 
-    inline — кнопки в сообщении (с «❌ Отмена»); keyboard — своя нижняя клавиатура шага (числа, время);
-    без них внизу только «❌ Отмена».
+    inline — кнопки в сообщении; keyboard — своя нижняя клавиатура (только у шага времени).
+    Без keyboard нижняя клавиатура не меняется — на ней остаётся «❌ Отмена» из главного меню.
     """
     text = f"{rule}\n\n{instruction}" if rule else instruction
-    step = await message.answer(text, reply_markup=inline or keyboard or get_cancel_keyboard())
+    step = await message.answer(text, reply_markup=inline or keyboard)
     await delete_prompts(bot, message.chat.id, state)
     await remember_prompt(state, step)
 
@@ -343,7 +347,7 @@ async def ask_details(message: Message, state: FSMContext, bot: Bot):
         await show_step(
             message, state, bot, label,
             f"Как часто напоминать?\nВыберите количество {unit} из предложенных ниже или введите своё число.",
-            keyboard=get_interval_keyboard(repeat_type),
+            inline=get_interval_keyboard(repeat_type),
         )
         await state.set_state(ReminderFlow.waiting_for_interval)
     elif repeat_type == 'weekly':
@@ -359,11 +363,14 @@ async def ask_details(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(F.text == BTN_CANCEL)
 async def cancel_flow(message: Message, state: FSMContext, bot: Bot):
-    in_flow = await state.get_state() is not None
-    await message.answer(
-        "❌ Создание напоминания отменено." if in_flow else "Выберите действие:",
-        reply_markup=get_main_menu_keyboard()
-    )
+    if await state.get_state() is None:
+        # Отменять нечего — молча убираем нажатие, чтобы не засорять чат
+        try:
+            await bot.delete_message(message.chat.id, message.message_id)
+        except TelegramAPIError:
+            pass
+        return
+    await message.answer("❌ Создание напоминания отменено.", reply_markup=get_main_menu_keyboard())
     await delete_prompts(bot, message.chat.id, state)
     await state.clear()
 
@@ -550,9 +557,27 @@ async def interval_input(message: Message, state: FSMContext, bot: Bot):
     limit = NUMBER_LIMITS[repeat_type]
     n = parse_number(message.text, limit)
     if n is None:
-        await say_in_step(message, state, f"❌ Нужно целое число от 1 до {limit}. Выберите число ниже или введите своё.")
+        await say_in_step(message, state, f"❌ Нужно целое число от 1 до {limit}. Выберите число выше или введите своё.")
         return
+    await interval_chosen(message, state, bot, n)
 
+
+@router.callback_query(StateFilter(ReminderFlow.waiting_for_interval, ReminderFlow.waiting_for_month_offset),
+                       F.data.startswith("num_"))
+async def number_chosen(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """Число N нажато кнопкой в сообщении."""
+    await callback.answer()
+    n = parse_id(callback.data.removeprefix("num_"))
+    if n is None:
+        return
+    if await state.get_state() == ReminderFlow.waiting_for_month_offset.state:
+        await month_offset_chosen(callback.message, state, bot, min(n, NUMBER_LIMITS['before_end']))
+    else:
+        await interval_chosen(callback.message, state, bot, n)
+
+
+async def interval_chosen(message: Message, state: FSMContext, bot: Bot, n: int):
+    repeat_type = (await state.get_data()).get('repeat_type', 'daily')
     await state.update_data(interval=n)
     rule = describe_repeat(repeat_type, {'every': n})
     if repeat_type == 'hourly':
@@ -612,7 +637,7 @@ async def month_mode_selected(callback: CallbackQuery, state: FSMContext, bot: B
         await show_step(
             callback.message, state, bot, REPEAT_LABELS['monthly'],
             "За сколько дней до конца месяца напоминать?\nВыберите число ниже или введите своё.",
-            keyboard=get_interval_keyboard('before_end'),
+            inline=get_interval_keyboard('before_end'),
         )
         await state.set_state(ReminderFlow.waiting_for_month_offset)
 
@@ -646,8 +671,12 @@ async def month_offset_input(message: Message, state: FSMContext, bot: Bot):
     limit = NUMBER_LIMITS['before_end']
     n = parse_number(message.text, limit)
     if n is None:
-        await say_in_step(message, state, f"❌ Нужно целое число от 1 до {limit}. Выберите число ниже или введите своё.")
+        await say_in_step(message, state, f"❌ Нужно целое число от 1 до {limit}. Выберите число выше или введите своё.")
         return
+    await month_offset_chosen(message, state, bot, n)
+
+
+async def month_offset_chosen(message: Message, state: FSMContext, bot: Bot, n: int):
     config = {'before_end': n}
     await state.update_data(month_config=config)
     await ask_time(message, state, bot, describe_repeat('monthly', config))
