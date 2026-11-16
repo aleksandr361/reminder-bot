@@ -307,30 +307,21 @@ async def test_main_with_token_rejected_by_telegram_exits_with_hint(main_module,
 
 # ---------- 8. Сегодняшнее число в календаре ----------
 
-def marked_days(markup):
-    """Номера дней, чей текст на кнопке отличается от простого числа."""
-    days = []
-    for row in markup.inline_keyboard:
-        for b in row:
-            if b.callback_data.startswith("date_"):
-                day = b.callback_data.split("_")[4]
-                if b.text != day:
-                    days.append((int(b.callback_data.split("_")[2]), int(b.callback_data.split("_")[3]), int(day)))
-    return days
+async def open_calendar(send, state, main_module):
+    """Шаг текста «однократного» напоминания → календарь. Возвращает сообщение с календарём."""
+    await state.update_data(repeat_type="once")
+    await state.set_state(main_module.ReminderFlow.waiting_for_text)
+    msg = FakeMessage(1, text="x")
+    await send(msg, state)
+    return msg.answered[-1]
 
 
 async def test_calendar_marks_today_in_users_timezone(send, fsm, main_module):
     tz = "Pacific/Kiritimati"  # UTC+14: «сегодня» здесь часто уже не то, что у сервера
     await make_user(1, tz=tz)
-    state = fsm(1)
-    await state.update_data(repeat_type="once")
-    await state.set_state(main_module.ReminderFlow.waiting_for_text)
-    msg = FakeMessage(1, text="x")
-    await send(msg, state)  # после текста бот присылает календарь
-
+    calendar_msg = await open_calendar(send, fsm(1), main_module)
     today = datetime.now(ZoneInfo(tz)).date()
-    markup = msg.answered[-1].kwargs["reply_markup"]
-    assert marked_days(markup) == [(today.year, today.month, today.day)]
+    assert calendar_msg.kwargs["reply_markup"].keyboard[0][0].text == f"•{today.day}•"
 
 
 async def test_snooze_keeps_attachment(press, fsm):
@@ -360,17 +351,20 @@ async def test_buttons_under_photo_reminder_edit_caption(press, fsm, data):
     assert cb.answers
 
 
-async def test_calendar_navigation_keeps_today_mark(press, fsm, main_module):
+async def test_calendar_navigation_keeps_today_mark(send, fsm, main_module):
     await make_user(1, tz="Europe/Moscow")
     state = fsm(1)
-    await state.set_state(main_module.ReminderFlow.waiting_for_date)
+    calendar_msg = await open_calendar(send, state, main_module)
+
+    forward = FakeMessage(1, text=calendar_msg.kwargs["reply_markup"].keyboard[-2][-1].text)  # «December ▶»
+    await send(forward, state)
+    next_month = forward.answered[-1].kwargs["reply_markup"].keyboard
+    assert all("•" not in b.text for row in next_month for b in row)
+
+    back = FakeMessage(1, text=next_month[-2][0].text)  # «◀ November»
+    await send(back, state)
     today = datetime.now(ZoneInfo("Europe/Moscow")).date()
-
-    msg = FakeMessage(1)
-    await press(FakeCallback(f"cal_1_{today.year}_{today.month}", msg), state)
-    markup = next(kw["reply_markup"] for kind, _, kw in msg.sent if kind == "edit_reply_markup")
-    assert marked_days(markup) == [(today.year, today.month, today.day)]
-
+    assert back.answered[-1].kwargs["reply_markup"].keyboard[0][0].text == f"•{today.day}•"
 
 
 # ---------- «Мои напоминания»: каждое отдельно, кнопка отмены в сообщении ----------
