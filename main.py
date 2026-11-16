@@ -26,16 +26,12 @@ from storage import (
 )
 from keyboards import (
     BTN_CANCEL,
-    BTN_CONFIRM,
     BTN_START_NOW,
     CANCEL_DATA,
-    MONTH_MODES,
-    WEEKDAYS,
     get_timezone_geo_or_manual,
     get_timezone_geo_button,
     get_time_keyboard,
-    get_calendar_keyboard,
-    get_cancel_keyboard,
+    get_calendar,
     get_main_menu_keyboard,
     get_repeat_type_keyboard,
     get_weekdays_keyboard,
@@ -47,15 +43,12 @@ from keyboards import (
 from scheduler import create_scheduler, next_monthly_run
 from texts import (
     ATTACHMENT_LABELS,
-    MONTHS,
     REPEAT_LABELS,
     WEEKDAY_ORDER,
     describe_content,
     describe_repeat,
     format_date,
     format_duration,
-    format_weekdays,
-    join_and,
     month_note,
     order_weekdays,
 )
@@ -74,7 +67,8 @@ tf = TimezoneFinder()
 REPEAT_TYPES = tuple(REPEAT_LABELS)
 # Самое большое N: неделя в часах, год в днях, за 27 дней до конца (в феврале остаётся 1-е число)
 NUMBER_LIMITS = {'hourly': 168, 'daily': 365, 'before_end': 27}
-# Кнопки в сообщениях из прошлых версий бота (шаги создания теперь на нижней клавиатуре)
+# Кнопки шагов создания напоминания: работают только пока идёт диалог
+# ("time_" — кнопки времени из старых версий бота)
 FLOW_BUTTON_PREFIXES = ("repeat_", "weekday_", "cal_", "date_", "time_", "monthmode_", "mday_", "start_now", "num_")
 NOT_FOUND = "❌ Напоминание не найдено"
 TIME_EXAMPLE = "(например: 1015)"
@@ -85,15 +79,9 @@ MONTH_DAYS_STEP = (
     "ℹ️ Если выбранный день отсутствует в месяце (например, 29 или 30), "
     "напоминание придёт в последний день этого месяца."
 )
-CALENDAR_HINT = "Выберите число ниже или введите дату вручную (например: 25.11)."
+BUTTONS_HINT = "👆 Выберите вариант кнопками в сообщении выше или нажмите «❌ Отмена»."
 # 1430, 930, 14:30, 14.30, 14 30
 TIME_RE = re.compile(r"([01]?\d|2[0-3])[:.\s-]?([0-5]\d)")
-# 25.11, 25.11.2026, 25/11/26
-DATE_RE = re.compile(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2}|\d{4}))?")
-# Кнопки нижней клавиатуры → что выбрано
-TYPE_BY_LABEL = {label: key for key, label in REPEAT_LABELS.items()}
-MODE_BY_LABEL = {label: key for key, label in MONTH_MODES.items()}
-WEEKDAY_BY_NAME = {name: code for code, name in WEEKDAYS}
 
 
 class ReminderFlow(StatesGroup):
@@ -107,6 +95,16 @@ class ReminderFlow(StatesGroup):
     waiting_for_month_offset = State()  # N для «за N дней до конца месяца»
     waiting_for_time = State()
     waiting_for_tz_input = State()
+
+
+# Шаги, где ответ — кнопки в сообщении (печатать текст бесполезно)
+BUTTON_STEPS = (
+    ReminderFlow.waiting_for_repeat_type,
+    ReminderFlow.waiting_for_date,
+    ReminderFlow.waiting_for_weekdays,
+    ReminderFlow.waiting_for_month_mode,
+    ReminderFlow.waiting_for_month_days,
+)
 
 
 # ---------- Вспомогательные функции ----------
@@ -168,26 +166,6 @@ def parse_number(text: str | None, limit: int) -> int | None:
     raw = (text or "").strip()
     n = int(raw) if raw.isdigit() else 0
     return n if 1 <= n <= limit else None
-
-
-def parse_date_input(text: str | None, year: int, month: int, today: date) -> date | None:
-    """Дата из нажатой кнопки календаря («17», «•16•» — число показанного месяца) или введённая вручную:
-    «25.11» (ближайшее будущее 25 ноября), «25.11.2026». None — если это не дата."""
-    raw = (text or "").strip().strip("•").strip()
-    try:
-        if raw.isdigit():
-            return date(year, month, int(raw))
-        match = DATE_RE.fullmatch(raw)
-        if not match:
-            return None
-        day, mon = int(match[1]), int(match[2])
-        if match[3]:
-            y = int(match[3])
-            return date(y + 2000 if y < 100 else y, mon, day)
-        d = date(today.year, mon, day)
-        return d if d >= today else date(today.year + 1, mon, day)
-    except ValueError:
-        return None
 
 
 def parse_id(raw: str) -> int | None:
@@ -277,23 +255,25 @@ async def send_settings(message: Message):
 
 
 # ---------- Шаги диалога ----------
-# Каждый шаг — одно сообщение без кнопок внутри: «[уже выбранное правило]» → «что сделать сейчас».
-# Варианты ответа и «❌ Отмена» — на нижней клавиатуре этого же сообщения.
+# Каждый шаг — одно сообщение: «[уже выбранное правило]» → «что сделать сейчас».
 #
-# Нижнюю клавиатуру в Telegram задаёт последнее сообщение бота с клавиатурой; если его удалить —
-# пропадает и она. Поэтому каждый шаг приносит свою клавиатуру, а вопросы прошлого шага удаляются
-# уже после того, как пришёл новый. «❌ Отмена» есть только во время создания — в главном меню её нет.
-# Нажатия кнопок и неверные ответы тоже убираются; в чате остаются текст напоминания и итог.
+# «❌ Отмена» всегда на нижней клавиатуре. Нижнюю клавиатуру в Telegram задаёт последнее сообщение
+# бота с клавиатурой, и если его удалить — она пропадает; а сообщение с кнопками внутри своей
+# нижней клавиатуры нести не может. Поэтому «❌ Отмена» — постоянная кнопка главного меню, которое
+# держат итоговые сообщения («✅ Напоминание установлено», /start и т.п.): их бот не удаляет.
+# Шаги с кнопками в сообщении (меню, числа, календарь, дни недели, режим и дни месяца) и шаг текста
+# нижнюю клавиатуру не меняют. Свою клавиатуру (часы и «❌ Отмена») приносит только шаг времени —
+# последний, после него главное меню возвращается с итоговым сообщением.
 
 async def remember_prompt(state: FSMContext, *messages: Message):
-    """Запомнить сообщения шага (вопрос бота, нажатие пользователя), чтобы убрать их на следующем шаге."""
+    """Запомнить вопросы бота, чтобы убрать их, когда пользователь ответит."""
     data = await state.get_data()
     ids = list(data.get('prompt_ids', [])) + [m.message_id for m in messages]
     await state.update_data(prompt_ids=list(dict.fromkeys(ids)))
 
 
 async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext):
-    """Удалить запомненные сообщения. Если сообщение уже не удалить — не страшно."""
+    """Удалить запомненные вопросы бота. Если сообщение уже не удалить — не страшно."""
     old = (await state.get_data()).get('prompt_ids', [])
     if old:
         try:
@@ -303,10 +283,15 @@ async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext):
     await state.update_data(prompt_ids=[])
 
 
-async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str, keyboard):
-    """Отправить шаг диалога одним сообщением со своей нижней клавиатурой и убрать прошлый шаг."""
+async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str, *,
+                    inline=None, keyboard=None):
+    """Отправить шаг диалога одним сообщением и убрать вопросы предыдущего шага.
+
+    inline — кнопки в сообщении; keyboard — своя нижняя клавиатура (только у шага времени).
+    Без keyboard нижняя клавиатура не меняется — на ней остаётся «❌ Отмена» из главного меню.
+    """
     text = f"{rule}\n\n{instruction}" if rule else instruction
-    step = await message.answer(text, reply_markup=keyboard)
+    step = await message.answer(text, reply_markup=inline or keyboard)
     await delete_prompts(bot, message.chat.id, state)
     await remember_prompt(state, step)
 
@@ -318,42 +303,20 @@ async def say_in_step(message: Message, state: FSMContext, text: str):
 
 async def ask_time(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str = TIME_STEP,
                    start_now: bool = False):
-    await show_step(message, state, bot, rule, instruction, get_time_keyboard(start_now=start_now))
+    await show_step(message, state, bot, rule, instruction, keyboard=get_time_keyboard(start_now=start_now))
     await state.set_state(ReminderFlow.waiting_for_time)
 
 
-async def ask_calendar(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str,
-                       year: int | None = None, month: int | None = None):
-    """Календарь на клавиатуре: числа месяца (с сегодняшнего) и листание месяцев."""
+async def ask_calendar(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str):
     # Сегодняшняя дата — пользователя, а не сервера
     today = user_now(await get_user_timezone(message.chat.id)).date()
-    year, month = year or today.year, month or today.month
-    await state.update_data(cal_rule=rule, cal_instruction=instruction, cal_year=year, cal_month=month)
-    await show_step(message, state, bot, rule, f"{instruction}\n📅 {MONTHS[month - 1]} {year}\n{CALENDAR_HINT}",
-                    get_calendar_keyboard(year, month, today))
+    await show_step(message, state, bot, rule, instruction,
+                    inline=get_calendar(today.year, today.month, message.chat.id, today=today))
     await state.set_state(ReminderFlow.waiting_for_date)
 
 
-async def ask_weekdays(message: Message, state: FSMContext, bot: Bot, selected: set):
-    instruction = f"Выберите дни недели.\n{CHOOSE_DAYS}"
-    if selected:
-        instruction += f"\n\nВыбрано: {format_weekdays(selected)}"
-    await show_step(message, state, bot, REPEAT_LABELS['weekly'], instruction, get_weekdays_keyboard(selected))
-    await state.set_state(ReminderFlow.waiting_for_weekdays)
-
-
-async def ask_month_days(message: Message, state: FSMContext, bot: Bot, selected: set):
-    instruction = MONTH_DAYS_STEP
-    if selected:
-        instruction += f"\n\nВыбрано: {join_and(sorted(selected))}"
-    await show_step(message, state, bot, REPEAT_LABELS['monthly'], instruction, get_month_days_keyboard(selected))
-    await state.set_state(ReminderFlow.waiting_for_month_days)
-
-
-async def start_new_reminder(message: Message, state: FSMContext, bot: Bot, content: tuple | None = None,
-                             trigger: Message | None = None):
-    """Начать создание напоминания. content — если текст уже прислали (раздел 7 ТЗ);
-    trigger — нажатие «➕ Новое напоминание» или /remind, его уберём вместе с первым вопросом."""
+async def start_new_reminder(message: Message, state: FSMContext, bot: Bot, content: tuple | None = None):
+    """Начать создание напоминания. content — если текст уже прислали (раздел 7 ТЗ)."""
     user_tz = await get_user_timezone(message.chat.id)
     if not user_tz:
         await message.answer("❌ Сначала установите часовой пояс: /timezone")
@@ -362,14 +325,13 @@ async def start_new_reminder(message: Message, state: FSMContext, bot: Bot, cont
     # Если прошлый диалог бросили на середине — его выбор не нужен, а вопросы уберём
     old_prompts = (await state.get_data()).get('prompt_ids', [])
     await state.set_data({'prompt_ids': old_prompts})
-    if trigger is not None:
-        await remember_prompt(state, trigger)
-    rule = ""
     if content:
         content_type, file_id, text = content
         await state.update_data(content_type=content_type, file_id=file_id, text=text)
-        rule = describe_content(content_type, text)
-    await show_step(message, state, bot, rule, "Выберите тип повторения:", get_repeat_type_keyboard())
+        await show_step(message, state, bot, describe_content(content_type, text), "Выберите тип повторения:",
+                        inline=get_repeat_type_keyboard())
+    else:
+        await show_step(message, state, bot, "", "Выберите тип повторения:", inline=get_repeat_type_keyboard())
     await state.set_state(ReminderFlow.waiting_for_repeat_type)
 
 
@@ -385,13 +347,15 @@ async def ask_details(message: Message, state: FSMContext, bot: Bot):
         await show_step(
             message, state, bot, label,
             f"Как часто напоминать?\nВыберите количество {unit} из предложенных ниже или введите своё число.",
-            get_interval_keyboard(repeat_type),
+            inline=get_interval_keyboard(repeat_type),
         )
         await state.set_state(ReminderFlow.waiting_for_interval)
     elif repeat_type == 'weekly':
-        await ask_weekdays(message, state, bot, set())
+        await show_step(message, state, bot, label, f"Выберите дни недели.\n{CHOOSE_DAYS}",
+                        inline=get_weekdays_keyboard())
+        await state.set_state(ReminderFlow.waiting_for_weekdays)
     else:  # monthly
-        await show_step(message, state, bot, label, "Как напоминать каждый месяц?", get_month_mode_keyboard())
+        await show_step(message, state, bot, label, "Как напоминать каждый месяц?", inline=get_month_mode_keyboard())
         await state.set_state(ReminderFlow.waiting_for_month_mode)
 
 
@@ -406,7 +370,6 @@ async def cancel_flow(message: Message, state: FSMContext, bot: Bot):
         except TelegramAPIError:
             pass
         return
-    await remember_prompt(state, message)
     await message.answer("❌ Создание напоминания отменено.", reply_markup=get_main_menu_keyboard())
     await delete_prompts(bot, message.chat.id, state)
     await state.clear()
@@ -414,7 +377,7 @@ async def cancel_flow(message: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data == CANCEL_DATA)
 async def cancel_flow_button(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    """«❌ Отмена» кнопкой в сообщении (из прошлых версий бота)."""
+    """«❌ Отмена» кнопкой в сообщении."""
     await callback.answer()
     if await state.get_state() is not None:
         await callback.message.answer("❌ Создание напоминания отменено.", reply_markup=get_main_menu_keyboard())
@@ -526,7 +489,7 @@ async def cmd_timezone(message: Message):
 # Обработчик текстовой кнопки "➕ Новое напоминание"
 @router.message(F.text == "➕ Новое напоминание")
 async def new_reminder_text(message: Message, state: FSMContext, bot: Bot):
-    await start_new_reminder(message, state, bot, trigger=message)
+    await start_new_reminder(message, state, bot)
 
 
 # Обработчик текстовой кнопки "📋 Мои напоминания"
@@ -549,27 +512,30 @@ async def new_reminder_callback(callback: CallbackQuery, state: FSMContext, bot:
 
 @router.message(Command("remind"))
 async def cmd_remind(message: Message, state: FSMContext, bot: Bot):
-    await start_new_reminder(message, state, bot, trigger=message)
+    await start_new_reminder(message, state, bot)
 
 
 # ---------- Создание напоминания ----------
 # Тип → текст или вложение → параметры типа → время → «✅ Напоминание установлено».
-# Все ответы приходят сообщениями — нажатием кнопки нижней клавиатуры или вводом вручную.
 
-@router.message(ReminderFlow.waiting_for_repeat_type)
-async def type_chosen(message: Message, state: FSMContext, bot: Bot):
-    await remember_prompt(state, message)
-    repeat_type = TYPE_BY_LABEL.get((message.text or "").strip())
-    if repeat_type is None:
-        await say_in_step(message, state, "👇 Выберите тип повторения на клавиатуре ниже.")
+# Тип можно выбрать и передумать, пока бот ждёт текст
+@router.callback_query(
+    StateFilter(ReminderFlow.waiting_for_repeat_type, ReminderFlow.waiting_for_text),
+    F.data.startswith("repeat_"),
+)
+async def repeat_type_selected(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    repeat_type = callback.data.removeprefix("repeat_")
+    if repeat_type not in REPEAT_TYPES:
+        await callback.answer()
         return
 
     await state.update_data(repeat_type=repeat_type)
+    await callback.answer()
     if 'content_type' in await state.get_data():
-        await ask_details(message, state, bot)  # текст уже прислали — сразу дальше
+        await ask_details(callback.message, state, bot)  # текст уже прислали — сразу дальше
     else:
-        await show_step(message, state, bot, REPEAT_LABELS[repeat_type],
-                        "Отправьте текст или вложение для напоминания:", get_cancel_keyboard())
+        await show_step(callback.message, state, bot, REPEAT_LABELS[repeat_type],
+                        "Отправьте текст или вложение для напоминания:")
         await state.set_state(ReminderFlow.waiting_for_text)
 
 
@@ -577,11 +543,9 @@ async def type_chosen(message: Message, state: FSMContext, bot: Bot):
 async def remind_content(message: Message, state: FSMContext, bot: Bot):
     content = extract_content(message)
     if content is None:
-        await remember_prompt(state, message)
         await say_in_step(message, state, "✏️ Отправьте текст, фото, видео, файл, голосовое или стикер.")
         return
 
-    # Сам текст напоминания остаётся в чате
     content_type, file_id, text = content
     await state.update_data(content_type=content_type, file_id=file_id, text=text)
     await ask_details(message, state, bot)
@@ -589,14 +553,31 @@ async def remind_content(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(ReminderFlow.waiting_for_interval)
 async def interval_input(message: Message, state: FSMContext, bot: Bot):
-    await remember_prompt(state, message)
     repeat_type = (await state.get_data()).get('repeat_type', 'daily')
     limit = NUMBER_LIMITS[repeat_type]
     n = parse_number(message.text, limit)
     if n is None:
-        await say_in_step(message, state, f"❌ Нужно целое число от 1 до {limit}. Выберите число ниже или введите своё.")
+        await say_in_step(message, state, f"❌ Нужно целое число от 1 до {limit}. Выберите число выше или введите своё.")
         return
+    await interval_chosen(message, state, bot, n)
 
+
+@router.callback_query(StateFilter(ReminderFlow.waiting_for_interval, ReminderFlow.waiting_for_month_offset),
+                       F.data.startswith("num_"))
+async def number_chosen(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """Число N нажато кнопкой в сообщении."""
+    await callback.answer()
+    n = parse_id(callback.data.removeprefix("num_"))
+    if n is None:
+        return
+    if await state.get_state() == ReminderFlow.waiting_for_month_offset.state:
+        await month_offset_chosen(callback.message, state, bot, min(n, NUMBER_LIMITS['before_end']))
+    else:
+        await interval_chosen(callback.message, state, bot, n)
+
+
+async def interval_chosen(message: Message, state: FSMContext, bot: Bot, n: int):
+    repeat_type = (await state.get_data()).get('repeat_type', 'daily')
     await state.update_data(interval=n)
     rule = describe_repeat(repeat_type, {'every': n})
     if repeat_type == 'hourly':
@@ -610,136 +591,154 @@ async def interval_input(message: Message, state: FSMContext, bot: Bot):
         await ask_calendar(message, state, bot, rule, "Выберите дату начала:")
 
 
-@router.message(ReminderFlow.waiting_for_date)
-async def date_input(message: Message, state: FSMContext, bot: Bot):
-    await remember_prompt(state, message)
+@router.callback_query(ReminderFlow.waiting_for_weekdays, F.data.startswith("weekday_"))
+async def weekday_toggle(callback: CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
-    text = (message.text or "").strip()
-    year, month = data.get('cal_year'), data.get('cal_month')
-    today = user_now(await get_user_timezone(message.chat.id)).date()
-    if not year or not month:
-        year, month = today.year, today.month
+    selected_weekdays = data.get('selected_weekdays', set())
 
-    # Листание месяцев: «◀ October» / «December ▶» (в прошлое — не дальше текущего месяца)
-    if text.startswith("◀") or text.endswith("▶"):
-        step = -1 if text.startswith("◀") else 1
-        index = year * 12 + month - 1 + step
-        year, month = divmod(index, 12)
-        month += 1
-        if (year, month) < (today.year, today.month):
-            year, month = today.year, today.month
-        await ask_calendar(message, state, bot, data.get('cal_rule', ''), data.get('cal_instruction', ''), year, month)
-        return
-
-    selected_date = parse_date_input(text, year, month, today)
-    if selected_date is None:
-        await say_in_step(message, state, f"❌ Не понял дату. {CALENDAR_HINT}")
-        return
-    if selected_date < today:
-        await say_in_step(message, state, "❌ Эта дата уже прошла, выберите другую.")
-        return
-
-    await state.update_data(selected_date=selected_date)
-    if data.get('repeat_type') == 'daily':
-        rule = describe_repeat('daily', {'every': data.get('interval', 1), 'start': selected_date.isoformat()})
-    else:
-        rule = f"{REPEAT_LABELS['once']}, {format_date(selected_date)}"
-    await ask_time(message, state, bot, rule)
-
-
-@router.message(ReminderFlow.waiting_for_weekdays)
-async def weekday_input(message: Message, state: FSMContext, bot: Bot):
-    await remember_prompt(state, message)
-    selected = set((await state.get_data()).get('selected_weekdays', set()))
-    text = (message.text or "").strip()
-
-    if text == BTN_CONFIRM:
-        if not selected:
-            await say_in_step(message, state, "❌ Выберите хотя бы один день!")
+    if callback.data == "weekday_done":
+        if not selected_weekdays:
+            await callback.answer("❌ Выберите хотя бы один день!", show_alert=True)
             return
-        await ask_time(message, state, bot, describe_repeat('weekly', {'weekdays': order_weekdays(selected)}))
+
+        await state.update_data(selected_weekdays=selected_weekdays)
+        await callback.answer()
+        await ask_time(callback.message, state, bot,
+                       describe_repeat('weekly', {'weekdays': order_weekdays(selected_weekdays)}))
         return
 
-    code = WEEKDAY_BY_NAME.get(text.removeprefix("✅").strip())
-    if code is None:
-        await say_in_step(message, state, "👇 Выберите дни недели на клавиатуре ниже и нажмите «Подтвердить выбор».")
-        return
-    selected ^= {code}  # нажатие на отмеченный день снимает отметку
-    await state.update_data(selected_weekdays=selected)
-    await ask_weekdays(message, state, bot, selected)
+    weekday = callback.data.split("_", 1)[1]
+
+    if weekday in selected_weekdays:
+        selected_weekdays.remove(weekday)
+    else:
+        selected_weekdays.add(weekday)
+
+    await state.update_data(selected_weekdays=selected_weekdays)
+    await callback.message.edit_reply_markup(
+        reply_markup=get_weekdays_keyboard(selected_weekdays)
+    )
+    await callback.answer()
 
 
-@router.message(ReminderFlow.waiting_for_month_mode)
-async def month_mode_input(message: Message, state: FSMContext, bot: Bot):
-    await remember_prompt(state, message)
-    mode = MODE_BY_LABEL.get((message.text or "").strip())
-    if mode is None:
-        await say_in_step(message, state, "👇 Выберите вариант на клавиатуре ниже.")
-        return
-
+@router.callback_query(ReminderFlow.waiting_for_month_mode, F.data.startswith("monthmode_"))
+async def month_mode_selected(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    mode = callback.data.removeprefix("monthmode_")
+    await callback.answer()
     if mode == 'days':
-        await ask_month_days(message, state, bot, set())
+        await show_step(callback.message, state, bot, REPEAT_LABELS['monthly'], MONTH_DAYS_STEP,
+                        inline=get_month_days_keyboard())
+        await state.set_state(ReminderFlow.waiting_for_month_days)
     elif mode == 'last':
         config = {'last': True}
         await state.update_data(month_config=config)
-        await ask_time(message, state, bot, describe_repeat('monthly', config))
-    else:  # before
+        await ask_time(callback.message, state, bot, describe_repeat('monthly', config))
+    elif mode == 'before':
         await show_step(
-            message, state, bot, REPEAT_LABELS['monthly'],
+            callback.message, state, bot, REPEAT_LABELS['monthly'],
             "За сколько дней до конца месяца напоминать?\nВыберите число ниже или введите своё.",
-            get_interval_keyboard('before_end'),
+            inline=get_interval_keyboard('before_end'),
         )
         await state.set_state(ReminderFlow.waiting_for_month_offset)
 
 
-@router.message(ReminderFlow.waiting_for_month_days)
-async def month_day_input(message: Message, state: FSMContext, bot: Bot):
-    await remember_prompt(state, message)
+@router.callback_query(ReminderFlow.waiting_for_month_days, F.data.startswith("mday_"))
+async def month_day_toggle(callback: CallbackQuery, state: FSMContext, bot: Bot):
     selected = set((await state.get_data()).get('month_days', set()))
-    text = (message.text or "").strip()
 
-    if text == BTN_CONFIRM:
+    if callback.data == "mday_done":
         if not selected:
-            await say_in_step(message, state, "❌ Выберите хотя бы один день!")
+            await callback.answer("❌ Выберите хотя бы один день!", show_alert=True)
             return
         config = {'days': sorted(selected)}
         await state.update_data(month_config=config)
-        await ask_time(message, state, bot, describe_repeat('monthly', config))
+        await callback.answer()
+        await ask_time(callback.message, state, bot, describe_repeat('monthly', config))
         return
 
-    raw = text.removeprefix("✅").strip()
-    day = int(raw) if raw.isdigit() else 0
-    if not 1 <= day <= 31:
-        await say_in_step(message, state, "👇 Выберите числа на клавиатуре ниже и нажмите «Подтвердить выбор».")
+    day = parse_id(callback.data.removeprefix("mday_"))
+    if day is None or not 1 <= day <= 31:
+        await callback.answer()
         return
-    selected ^= {day}  # нажатие на отмеченное число снимает отметку
+    selected ^= {day}
     await state.update_data(month_days=selected)
-    await ask_month_days(message, state, bot, selected)
+    await callback.message.edit_reply_markup(reply_markup=get_month_days_keyboard(selected))
+    await callback.answer()
 
 
 @router.message(ReminderFlow.waiting_for_month_offset)
 async def month_offset_input(message: Message, state: FSMContext, bot: Bot):
-    await remember_prompt(state, message)
     limit = NUMBER_LIMITS['before_end']
     n = parse_number(message.text, limit)
     if n is None:
-        await say_in_step(message, state, f"❌ Нужно целое число от 1 до {limit}. Выберите число ниже или введите своё.")
+        await say_in_step(message, state, f"❌ Нужно целое число от 1 до {limit}. Выберите число выше или введите своё.")
         return
+    await month_offset_chosen(message, state, bot, n)
+
+
+async def month_offset_chosen(message: Message, state: FSMContext, bot: Bot, n: int):
     config = {'before_end': n}
     await state.update_data(month_config=config)
     await ask_time(message, state, bot, describe_repeat('monthly', config))
 
 
-# Кнопка в сообщении из прошлых версий бота (шаги создания теперь на нижней клавиатуре)
+@router.callback_query(ReminderFlow.waiting_for_date, F.data.startswith("cal_"))
+async def calendar_nav(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    _, chat_id, year, month = parts
+    if chat_id != str(callback.message.chat.id):
+        await callback.answer("Это не ваш календарь!", show_alert=True)
+        return
+    today = user_now(await get_user_timezone(callback.message.chat.id)).date()
+    await callback.message.edit_reply_markup(
+        reply_markup=get_calendar(int(year), int(month), chat_id, today=today)
+    )
+    await callback.answer()
+
+
+@router.callback_query(ReminderFlow.waiting_for_date, F.data.startswith("date_"))
+async def date_selected(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    parts = callback.data.split("_")
+    if len(parts) != 5:
+        await callback.answer()
+        return
+    _, chat_id, year, month, day = parts
+    if chat_id != str(callback.message.chat.id):
+        await callback.answer("Это не ваш календарь!", show_alert=True)
+        return
+    selected_date = date(int(year), int(month), int(day))
+    today = user_now(await get_user_timezone(callback.message.chat.id)).date()
+    if selected_date < today:
+        await callback.answer("❌ Эта дата уже прошла, выберите другую", show_alert=True)
+        return
+
+    await state.update_data(selected_date=selected_date)
+    await callback.answer()
+    data = await state.get_data()
+    if data.get('repeat_type') == 'daily':
+        rule = describe_repeat('daily', {'every': data.get('interval', 1), 'start': selected_date.isoformat()})
+    else:
+        rule = f"{REPEAT_LABELS['once']}, {format_date(selected_date)}"
+    await ask_time(callback.message, state, bot, rule)
+
+
+# Кнопка шага создания нажата вне диалога (старое сообщение или бот перезапускался)
 @router.callback_query(F.data.startswith(FLOW_BUTTON_PREFIXES))
 async def stale_flow_button(callback: CallbackQuery):
     await callback.answer("⌛ Эта кнопка устарела. Начните заново: /remind", show_alert=True)
 
 
+@router.message(StateFilter(*BUTTON_STEPS))
+async def typed_on_button_step(message: Message, state: FSMContext):
+    await say_in_step(message, state, BUTTONS_HINT)
+
+
 @router.message(ReminderFlow.waiting_for_time, F.text == BTN_START_NOW)
 async def start_now_selected(message: Message, state: FSMContext, bot: Bot):
     """«📍 С текущего момента» для «Каждые N часов»."""
-    await remember_prompt(state, message)
     if (await state.get_data()).get('repeat_type') != 'hourly':
         await say_in_step(message, state, f"❌ Выберите время ниже или введите вручную {TIME_EXAMPLE}.")
         return
@@ -749,7 +748,6 @@ async def start_now_selected(message: Message, state: FSMContext, bot: Bot):
 @router.message(ReminderFlow.waiting_for_time)
 async def time_input(message: Message, state: FSMContext, bot: Bot):
     """Время с клавиатуры (09:00) или набранное вручную (1015, 930, 14:30)."""
-    await remember_prompt(state, message)
     selected_time = parse_time(message.text)
     if selected_time is None:
         await say_in_step(message, state, f"❌ Не понял время. Выберите время ниже или введите вручную {TIME_EXAMPLE}.")
