@@ -28,7 +28,8 @@ async def test_list_shows_weekdays_in_week_order(send, fsm):
     )
     msg = FakeMessage(1, text="📋 Мои напоминания")
     await send(msg, fsm(1))
-    assert any("Каждую неделю: Пн, Пт, Вс" in t for t in msg.texts()), msg.texts()
+    # как в прошлой версии: «🔄 Каждую неделю», а дни — отдельной строкой
+    assert any("🔄 Каждую неделю\n📅 Дни: Пн, Пт, Вс" in t for t in msg.texts()), msg.texts()
 
 
 async def test_weekly_confirmation_lists_days_in_week_order(send, fsm, main_module):
@@ -185,15 +186,6 @@ async def test_malformed_reminder_buttons_do_not_crash(press, fsm, data):
 
 # ---------- 6. Non-text messages in text steps ----------
 
-async def test_sticker_during_timezone_input_does_not_crash(send, fsm, main_module):
-    state = fsm(1)
-    await state.set_state(main_module.ReminderFlow.waiting_for_tz_input)
-    msg = FakeMessage(1, text=None)
-    await send(msg, state)
-    assert msg.texts()
-    assert await state.get_state() == main_module.ReminderFlow.waiting_for_tz_input.state
-
-
 async def test_sticker_during_time_input_does_not_crash(send, fsm, main_module):
     await make_user(1)
     state = fsm(1)
@@ -341,7 +333,7 @@ async def test_snooze_keeps_attachment(press, fsm):
     snoozed = (await all_reminders())[-1]
     assert snoozed["id"] != rid
     assert (snoozed["content_type"], snoozed["file_id"], snoozed["text"]) == ("photo", "photo-id", "рецепт")
-    assert json.loads(snoozed["repeat_config"]) == {"snoozed": 10}
+    assert (snoozed["repeat_type"], snoozed["repeat_config"]) == ("once", None)  # как в прошлой версии
 
 
 @pytest.mark.parametrize("data", ["done_{id}", "snooze_{id}_60", "cancel_series_{id}"])
@@ -408,8 +400,20 @@ async def test_cancel_from_list_changes_only_that_message(press, fsm):
 
     assert (await storage.get_reminder_by_id(once))["status"] == "canceled"
     kind, text, kwargs = reminder_msg.sent[-1]
-    assert kind == "edit_text" and "отменено" in text and kwargs.get("reply_markup") is None
+    # как в прошлой версии: напоминание остаётся, ниже дописано «❌ Напоминание отменено.»
+    assert kind == "edit_text" and kwargs.get("reply_markup") is None
+    assert text == "🗓 Напоминание #1\n📝 дело 1\n❌ Напоминание отменено."
+    assert cb.answers == [("✅ Напоминание отменено", False)]
     assert reminder_msg.answered == []
+
+
+async def test_cancel_series_from_list_appends_note(press, fsm):
+    _, daily = await make_list()
+    reminder_msg = FakeMessage(1, text="🔄📆 Напоминание\n📝 дело 2")
+    cb = FakeCallback(f"cancel_series_{daily}", reminder_msg)
+    await press(cb, fsm(1))
+    assert reminder_msg.sent[-1][1] == "🔄📆 Напоминание\n📝 дело 2\n❌ Серия напоминаний отменена."
+    assert cb.answers == [("✅ Серия отменена", False)]
 
 
 async def test_list_cancel_buttons_from_previous_version_still_work(press, fsm):
@@ -489,10 +493,10 @@ async def test_snooze_keeps_reminder_and_adds_bold_note(press, fsm):
     assert text == "🔔Напомни уточнить про &lt;Виноградову&gt;\n⏰ <b>Напоминание отложено на 30 минут.</b>"
     assert kwargs.get("parse_mode") == "HTML"
     assert kwargs.get("reply_markup") is None
-    assert cb.answers == [(None, False)]
+    assert cb.answers == [("✅ Отложено на 30 мин", False)]
 
 
-@pytest.mark.parametrize("minutes,label", [(5, "5 минут"), (15, "15 минут"), (60, "1 час")])
+@pytest.mark.parametrize("minutes,label", [(5, "5 минут"), (15, "15 минут"), (60, "60 минут")])
 async def test_snooze_note_duration(press, fsm, minutes, label):
     _, msg, _ = await press_on_fired(press, fsm, f"snooze_{{id}}_{minutes}", text="🔔ооо")
     assert msg.sent[-1][1].endswith(f"⏰ <b>Напоминание отложено на {label}.</b>")
@@ -509,7 +513,7 @@ async def test_snooze_on_photo_adds_note_to_caption(press, fsm):
 async def test_snooze_on_sticker_removes_buttons_and_tells_in_popup(press, fsm):
     _, msg, cb = await press_on_fired(press, fsm, "snooze_{id}_5")
     assert msg.sent[-1][0] == "edit_reply_markup"
-    assert cb.answers and "5 минут" in cb.answers[-1][0]
+    assert cb.answers[-1] == ("✅ Отложено на 5 мин", False)
 
 
 async def test_snoozed_copy_is_created(press, fsm):
@@ -529,7 +533,7 @@ async def test_list_item_format_like_screenshot(send, fsm):
     await send(msg, fsm(1))
     _, text, kwargs = msg.sent[0]
     assert text == ("📆 <b>Напоминание</b>\n📝 Пополнить &lt;карту&gt;\n"
-                    f"🕐 {at:%d.%m.%Y %H:%M}\n🔄 Каждый месяц, за 2 дня до конца месяца")
+                    f"🕐 {at:%d.%m.%Y %H:%M}\n🔄 Каждый месяц, за 2 дня до конца")
     assert kwargs.get("parse_mode") == "HTML"
 
 

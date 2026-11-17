@@ -151,3 +151,57 @@ async def test_init_db_upgrades_old_database(tmp_path, monkeypatch):
     assert (reminder["text"], reminder["repeat_type"]) == ("старое", "daily")
     assert (reminder["content_type"], reminder["file_id"]) == ("text", None)
     assert await storage.get_user_timezone(5) == "Europe/Moscow"
+    # и новые: пересланное ли сообщение, заблокировал ли пользователь бота
+    assert reminder["is_forward"] == 0
+    assert not await storage.is_user_blocked(5)
+
+
+async def test_forwarded_flag_is_stored():
+    uid = await make_user(1)
+    rid = await storage.create_reminder(uid, datetime(2026, 12, 1, tzinfo=UTC), "x", is_forward=True)
+    assert (await storage.get_reminder_by_id(rid))["is_forward"] == 1
+
+
+# ---------- Пользователь заблокировал бота ----------
+
+async def test_block_pauses_only_pending_reminders_of_that_user():
+    uid = await make_user(1)
+    pending = await storage.create_reminder(uid, datetime(2026, 12, 1, tzinfo=UTC), "a")
+    sent = await storage.create_reminder(uid, datetime(2026, 12, 1, tzinfo=UTC), "b")
+    await storage.update_reminder_status(sent, "sent")
+    stranger = await storage.create_reminder(await make_user(2), datetime(2026, 12, 1, tzinfo=UTC), "c")
+
+    assert await storage.block_user_and_pause(uid) == 1
+    assert await storage.is_user_blocked(1)
+    assert [r["id"] for r in await storage.get_paused_reminders(1)] == [pending]
+    assert await storage.count_paused_reminders(1) == 1
+    assert (await storage.get_reminder_by_id(sent))["status"] == "sent"
+    assert (await storage.get_reminder_by_id(stranger))["status"] == "pending"
+    assert await storage.get_user_reminders(1) == []  # в «Моих напоминаниях» приостановленных нет
+
+
+async def test_unblock_resume_and_delete_paused():
+    uid = await make_user(1)
+    a = await storage.create_reminder(uid, datetime(2026, 12, 1, tzinfo=UTC), "a")
+    await storage.create_reminder(uid, datetime(2026, 12, 2, tzinfo=UTC), "b")
+    await storage.block_user_and_pause(uid)
+
+    await storage.set_user_blocked(1, False)
+    assert not await storage.is_user_blocked(1)
+
+    await storage.resume_reminder(a, datetime(2026, 12, 5, 9, tzinfo=UTC))
+    resumed = await storage.get_reminder_by_id(a)
+    assert (resumed["status"], resumed["run_at"]) == ("pending", "2026-12-05T09:00:00")
+    assert await storage.delete_paused_reminders(1) == 1
+    assert await storage.count_paused_reminders(1) == 0
+    assert [r["id"] for r in await storage.get_user_reminders(1)] == [a]
+
+
+async def test_admin_stats():
+    assert (await storage.get_admin_stats())["avg_reminders_per_user"] == 0
+    u1, u2 = await make_user(1), await make_user(2)
+    for uid in (u1, u1, u1, u2):
+        await storage.create_reminder(uid, datetime(2026, 12, 1, tzinfo=UTC), "x")
+    assert await storage.get_admin_stats() == {
+        "users_total": 2, "reminders_total": 4, "avg_reminders_per_user": 2.0,
+    }

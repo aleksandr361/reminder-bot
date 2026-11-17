@@ -13,15 +13,7 @@ MONTHS = [
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December',
 ]
-# Типы повторения — как на кнопках меню
-REPEAT_LABELS = {
-    'once': '🗓 Однократно',
-    'hourly': '🔁 Каждые N часов',
-    'daily': '🔁 Каждые N дней',
-    'weekly': '📆 Каждую неделю',
-    'monthly': '📆 Каждый месяц',
-}
-# Вложения и как они называются в сообщениях бота.
+# Вложения, которые принимает бот (main.extract_content ищет их в этом порядке).
 # Порядок важен: у GIF в Telegram заполнены и animation, и document.
 ATTACHMENT_LABELS = {
     'photo': '🖼 Фото',
@@ -53,14 +45,6 @@ def format_date(d: date) -> str:
     return f"{d.day:02d} {MONTHS[d.month - 1]} {d.year}"
 
 
-def format_duration(minutes: int) -> str:
-    """10 -> «10 минут», 60 -> «1 час», 120 -> «2 часа»"""
-    if minutes and minutes % 60 == 0:
-        hours = minutes // 60
-        return f"{hours} {plural(hours, 'час', 'часа', 'часов')}"
-    return f"{minutes} {plural(minutes, 'минуту', 'минуты', 'минут')}"
-
-
 def join_and(items) -> str:
     """[5, 29] -> «5 и 29», [1, 15, 29] -> «1, 15 и 29»"""
     items = [str(i) for i in items]
@@ -89,54 +73,68 @@ def month_days(config: dict) -> list[int]:
     return sorted({d for d in (_int(x, 0) for x in days) if 1 <= d <= 31})
 
 
-def describe_repeat(repeat_type: str, config: dict, with_icon: bool = True) -> str:
-    """Правило повторения: «🔁 Каждые 3 часа», «📆 Каждый месяц, 5 и 29 числа»…
-    with_icon=False — без значка в начале («Каждые 3 часа»), для «Моих напоминаний»."""
-    rule = _repeat_rule(repeat_type, config)
-    return rule if with_icon else rule.split(" ", 1)[1]
+# Значок правила в «✅ Напоминание установлено» — как в прошлой версии бота
+CONFIRM_ICONS = {'once': '🗓', 'hourly': '🔃', 'daily': '🔃', 'weekly': '📆', 'monthly': '📆'}
+# Значок напоминания в «Моих напоминаниях»
+LIST_ICONS = {'once': '📆', 'hourly': '🔄🕰', 'daily': '🔄📆', 'weekly': '🔄📅', 'monthly': '📆'}
+# Текст напоминания, если это вложение без подписи
+ATTACHMENT_FALLBACK = "📎 Вложение"
 
 
-def _repeat_rule(repeat_type: str, config: dict) -> str:
+def every_text(repeat_type: str, n: int) -> str:
+    """«Каждые 3 часа», «Каждый час», «Каждые 7 дней», «Каждый день»."""
+    n = max(1, _int(n, 1))
+    if repeat_type == 'hourly':
+        return "Каждый час" if n == 1 else f"Каждые {n} {plural(n, 'час', 'часа', 'часов')}"
+    return "Каждый день" if n == 1 else f"Каждые {n} {plural(n, 'день', 'дня', 'дней')}"
+
+
+def before_end_text(n: int) -> str:
+    """«за 3 дня»"""
+    return f"за {n} {plural(n, 'день', 'дня', 'дней')}"
+
+
+def rule_text(repeat_type: str, config: dict) -> str:
+    """Правило без значка: «Каждые 3 часа», «Каждую неделю: Пн, Ср», «Каждый месяц, 5 и 29 числа»…"""
     if repeat_type in ('hourly', 'daily'):
-        n = max(1, _int(config.get('every', 1), 1))
-        if repeat_type == 'hourly':
-            return "🔁 Каждый час" if n == 1 else f"🔁 Каждые {n} {plural(n, 'час', 'часа', 'часов')}"
-        rule = "🔁 Каждый день" if n == 1 else f"🔁 Каждые {n} {plural(n, 'день', 'дня', 'дней')}"
-        if config.get('start'):
-            try:
-                rule += f", начиная с {format_date(date.fromisoformat(config['start']))}"
-            except (TypeError, ValueError):
-                pass
-        return rule
+        return every_text(repeat_type, config.get('every', 1))
     if repeat_type == 'weekly':
         weekdays = config.get('weekdays')
-        return f"📆 Каждую неделю: {format_weekdays(weekdays)}" if weekdays else "📆 Каждую неделю"
+        return f"Каждую неделю: {format_weekdays(weekdays)}" if weekdays else "Каждую неделю"
     if repeat_type == 'monthly':
         if config.get('last'):
-            return "📆 Каждый месяц, последний день"
+            return "Каждый месяц, последний день"
         if config.get('before_end'):
-            n = _int(config['before_end'], 1)
-            return f"📆 Каждый месяц, за {n} {plural(n, 'день', 'дня', 'дней')} до конца месяца"
+            return f"Каждый месяц, {before_end_text(_int(config['before_end'], 1))} до конца месяца"
         days = month_days(config)
-        return f"📆 Каждый месяц, {join_and(days)} числа" if days else "📆 Каждый месяц"
-    rule = REPEAT_LABELS['once']
-    if config.get('snoozed'):
-        rule += f" (отложено на {format_duration(_int(config['snoozed'], 0))})"
-    return rule
+        return f"Каждый месяц, {join_and(days)} числа" if days else "Каждый месяц"
+    return "Однократно"
+
+
+def describe_repeat(repeat_type: str, config: dict) -> str:
+    """Правило в «✅ Напоминание установлено»: «🔃 Каждые 3 часа», «📆 Каждый месяц, 5 и 29 числа»…"""
+    return f"{CONFIRM_ICONS.get(repeat_type, '🗓')} {rule_text(repeat_type, config)}"
+
+
+def list_repeat_text(repeat_type: str, config: dict) -> str:
+    """Правило в «Моих напоминаниях» (после «🔄»): дни недели идут отдельной строкой,
+    у «за N дней» — без слова «месяца», как в прошлой версии бота."""
+    if repeat_type == 'weekly':
+        return "Каждую неделю"
+    if repeat_type == 'monthly' and config.get('before_end') and not config.get('last'):
+        return f"Каждый месяц, {before_end_text(_int(config['before_end'], 1))} до конца"
+    return rule_text(repeat_type, config)
 
 
 def month_note(config: dict) -> str | None:
     """Пояснение для дней 29–31: в коротких месяцах напоминание придёт в последний день."""
-    long_days = [d for d in month_days(config) if d > 28] if not (config.get('last') or config.get('before_end')) else []
-    if not long_days:
+    if config.get('last') or config.get('before_end'):
         return None
-    return f"ℹ️ В месяцах без {join_and(long_days)} числа напоминание придёт в последний день"
+    if not any(d > 28 for d in month_days(config)):
+        return None
+    return "ℹ️ В месяцах без указанного числа напоминание придёт в последний день"
 
 
-def describe_content(content_type: str | None, text: str | None) -> str:
-    """Текст напоминания как есть или «🖼 Фото: подпись» для вложения."""
-    text = text or ''
-    label = ATTACHMENT_LABELS.get(content_type or 'text')
-    if label:
-        return f"{label}: {text}" if text else label
-    return text
+def display_text(text: str | None) -> str:
+    """Текст напоминания (или подпись к вложению); у вложения без подписи — «📎 Вложение»."""
+    return text or ATTACHMENT_FALLBACK

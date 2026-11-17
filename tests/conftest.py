@@ -39,6 +39,11 @@ class FakeMessage:
         self.location = location
         self.sent = []
         self.answered = []  # сообщения, которые бот отправил в ответ (с их message_id)
+        self.is_deleted = False  # бот удалил это сообщение (message.delete())
+
+    async def delete(self):
+        self.is_deleted = True
+        return True
 
     async def answer(self, text, **kwargs):
         self.sent.append(("answer", text, kwargs))

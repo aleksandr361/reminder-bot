@@ -142,13 +142,36 @@ async def test_reminder_is_sent_only_once_per_occurrence():
     assert len(bot.sent) == 1
 
 
-async def test_blocked_bot_marks_reminder_failed():
+async def test_blocked_bot_pauses_all_reminders_of_that_user():
+    """Как в прошлой версии: бот заблокирован — все активные напоминания пользователя ждут его возвращения."""
     uid = await make_user(77)
-    rid = await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), "x", repeat_type="daily")
+    due = await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), "x", repeat_type="daily")
+    later = await storage.create_reminder(uid, datetime.now(UTC) + timedelta(days=1), "y")
+    other = await storage.create_reminder(await make_user(88), datetime.now(UTC) + timedelta(days=1), "z")
     error = TelegramForbiddenError(method=SendMessage(chat_id=77, text="x"),
                                    message="Forbidden: bot was blocked by the user")
     await scheduler.check_due_reminders(FakeBot(error=error))
-    assert (await storage.get_reminder_by_id(rid))["status"] == "failed"
+
+    assert (await storage.get_reminder_by_id(due))["status"] == storage.PAUSED
+    assert (await storage.get_reminder_by_id(later))["status"] == storage.PAUSED
+    assert (await storage.get_reminder_by_id(other))["status"] == "pending"
+    assert await storage.is_user_blocked(77)
+    assert not await storage.is_user_blocked(88)
+
+
+async def test_blocked_user_is_tried_once_per_pass():
+    uid = await make_user(77)
+    for text in ("a", "b", "c"):
+        await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), text)
+    calls = []
+
+    class CountingBot(FakeBot):
+        async def send_message(self, chat_id, text, **kwargs):
+            calls.append(text)
+            raise TelegramForbiddenError(method=SendMessage(chat_id=chat_id, text=text), message="Forbidden")
+
+    await scheduler.check_due_reminders(CountingBot())
+    assert len(calls) == 1
 
 
 async def test_network_error_keeps_reminder_for_retry():
@@ -292,20 +315,33 @@ def test_monthly_skips_missed_months():
 
 # ---------- Вложения ----------
 
-async def test_photo_reminder_is_sent_as_photo_with_caption_and_buttons():
+async def test_photo_reminder_is_photo_then_bell_message_with_buttons():
+    """Как в прошлой версии: сначала само фото с подписью, затем «🔔текст» с кнопками."""
     uid = await make_user(77)
     rid = await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), "рецепт",
                                         content_type="photo", file_id="photo-id")
     bot = FakeBot()
     await scheduler.check_due_reminders(bot)
 
-    assert bot.sent == []
     method, chat_id, file_id, kwargs = bot.media[0]
     assert (method, chat_id, file_id) == ("send_photo", 77, "photo-id")
-    assert kwargs["caption"] == "🔔рецепт"
-    datas = [b.callback_data for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert kwargs["caption"] == "рецепт"
+    assert "reply_markup" not in kwargs
+    [(sent_chat, text, msg_kwargs)] = bot.sent
+    assert (sent_chat, text) == (77, "🔔рецепт")
+    datas = [b.callback_data for row in msg_kwargs["reply_markup"].inline_keyboard for b in row]
     assert f"done_{rid}" in datas
     assert (await storage.get_reminder_by_id(rid))["status"] == "sent"
+
+
+async def test_photo_without_caption_says_attachment():
+    uid = await make_user(77)
+    await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), "",
+                                  content_type="photo", file_id="photo-id")
+    bot = FakeBot()
+    await scheduler.check_due_reminders(bot)
+    assert bot.media[0][3]["caption"] is None
+    assert bot.sent[0][1] == "🔔📎 Вложение"
 
 
 async def test_long_caption_is_trimmed_to_telegram_limit():
@@ -317,7 +353,7 @@ async def test_long_caption_is_trimmed_to_telegram_limit():
     assert len(bot.media[0][3]["caption"]) <= 1024
 
 
-async def test_sticker_gets_buttons_itself_without_extra_message():
+async def test_sticker_then_bell_message_with_buttons():
     uid = await make_user(77)
     rid = await storage.create_reminder(uid, datetime.now(UTC) - timedelta(seconds=1), "",
                                         content_type="sticker", file_id="st")
@@ -325,10 +361,11 @@ async def test_sticker_gets_buttons_itself_without_extra_message():
     await scheduler.check_due_reminders(bot)
 
     assert bot.media[0][:3] == ("send_sticker", 77, "st")
-    assert "caption" not in bot.media[0][3]
-    datas = [b.callback_data for row in bot.media[0][3]["reply_markup"].inline_keyboard for b in row]
+    assert bot.media[0][3] == {}  # у стикера ни подписи, ни кнопок
+    [(_, text, kwargs)] = bot.sent
+    assert text == "🔔📎 Вложение"
+    datas = [b.callback_data for row in kwargs["reply_markup"].inline_keyboard for b in row]
     assert f"done_{rid}" in datas
-    assert bot.sent == []  # отдельного сообщения нет
 
 
 # ---------- Режимы «каждый месяц» по ТЗ ----------

@@ -20,8 +20,8 @@ from aiogram.exceptions import (
 )
 
 from keyboards import get_snooze_keyboard
-from storage import get_due_reminders, set_reminder_run_at, update_reminder_status
-from texts import month_days
+from storage import block_user_and_pause, get_due_reminders, set_reminder_run_at, update_reminder_status
+from texts import display_text, month_days
 
 log = logging.getLogger(__name__)
 
@@ -140,31 +140,33 @@ def next_monthly_run(config: dict, tz, at: time, after: datetime) -> datetime | 
 
 
 async def _send(bot, reminder: dict):
-    """Отправить напоминание: текстом или тем же вложением, с кнопками «Отложить / Готово»."""
+    """Отправить напоминание, как в прошлой версии бота: вложение (с подписью, если она есть),
+    а затем «🔔текст» с кнопками «Отложить / Готово» («🔔📎 Вложение», если подписи нет)."""
     chat_id = reminder["chat_id"]
     kind = reminder.get("content_type") or "text"
     file_id = reminder.get("file_id")
     text = reminder.get("text") or ""
     keyboard = get_snooze_keyboard(reminder["id"], reminder.get("repeat_type") or "once")
 
-    # Только колокольчик и само напоминание: «🔔Купить хлеб»
-    if kind in CAPTION_SENDERS and file_id:
+    has_attachment = bool(file_id) and (kind in CAPTION_SENDERS or kind in NO_CAPTION_SENDERS)
+    if has_attachment and kind in CAPTION_SENDERS:
         await getattr(bot, CAPTION_SENDERS[kind])(
-            chat_id, file_id, caption=f"{BELL}{text}"[:MAX_CAPTION_LEN], parse_mode=None, reply_markup=keyboard
+            chat_id, file_id, caption=text[:MAX_CAPTION_LEN] or None, parse_mode=None
         )
-    elif kind in NO_CAPTION_SENDERS and file_id:
-        # У кружков и стикеров подписи нет — кнопки прямо под ними
-        await getattr(bot, NO_CAPTION_SENDERS[kind])(chat_id, file_id, reply_markup=keyboard)
-    else:
-        await bot.send_message(
-            chat_id,
-            f"{BELL}{text}"[:MAX_MESSAGE_LEN],
-            parse_mode=None,  # текст пользователя отправляем как есть
-            reply_markup=keyboard,
-        )
+    elif has_attachment:
+        await getattr(bot, NO_CAPTION_SENDERS[kind])(chat_id, file_id)  # у кружков и стикеров подписи нет
+
+    body = display_text(text) if has_attachment else text
+    await bot.send_message(
+        chat_id,
+        f"{BELL}{body}"[:MAX_MESSAGE_LEN],
+        parse_mode=None,  # текст пользователя отправляем как есть
+        reply_markup=keyboard,
+    )
 
 
-async def _deliver(bot, reminder: dict, now: datetime):
+async def _deliver(bot, reminder: dict, now: datetime) -> bool:
+    """Отправить одно напоминание. False — пользователь заблокировал бота."""
     reminder_id = reminder["id"]
     repeat_type = reminder.get("repeat_type") or "once"
 
@@ -172,15 +174,21 @@ async def _deliver(bot, reminder: dict, now: datetime):
         await _send(bot, reminder)
     except TelegramRetryAfter as e:
         log.warning("Telegram просит подождать %s с, напоминание %s отправим позже", e.retry_after, reminder_id)
-        return
+        return True
     except TelegramNetworkError as e:
         log.warning("Нет связи с Telegram (%s), напоминание %s отправим позже", e, reminder_id)
-        return
-    except (TelegramForbiddenError, TelegramBadRequest) as e:
-        # Бот заблокирован, чат удалён, файл недоступен и т.п. — повторять бессмысленно
+        return True
+    except TelegramForbiddenError as e:
+        # Бот заблокирован: напоминания пользователя ждут, пока он не вернётся (/start)
+        paused = await block_user_and_pause(reminder["user_id"])
+        log.warning("Пользователь %s заблокировал бота (%s), приостановлено напоминаний: %s",
+                    reminder["user_id"], e, paused)
+        return False
+    except TelegramBadRequest as e:
+        # Чат удалён, файл недоступен и т.п. — повторять бессмысленно
         log.warning("Напоминание %s не доставлено: %s", reminder_id, e)
         await update_reminder_status(reminder_id, "failed")
-        return
+        return True
 
     run_at = datetime.fromisoformat(reminder["run_at"]).replace(tzinfo=UTC)
     next_run = compute_next_run(repeat_type, run_at, reminder.get("timezone"),
@@ -189,14 +197,19 @@ async def _deliver(bot, reminder: dict, now: datetime):
         await update_reminder_status(reminder_id, "sent")
     else:
         await set_reminder_run_at(reminder_id, next_run)
+    return True
 
 
 async def check_due_reminders(bot):
     """Один проход: отправить всё, что пора отправить."""
     now = datetime.now(UTC)
+    blocked: set[int] = set()  # кто заблокировал бота — их остальные напоминания уже приостановлены
     for reminder in await get_due_reminders(now):
+        if reminder["user_id"] in blocked:
+            continue
         try:
-            await _deliver(bot, reminder, now)
+            if not await _deliver(bot, reminder, now):
+                blocked.add(reminder["user_id"])
         except Exception:
             log.exception("Ошибка при отправке напоминания %s", reminder.get("id"))
 
