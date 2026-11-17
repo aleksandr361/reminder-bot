@@ -209,9 +209,13 @@ async def test_text_outside_flow_goes_straight_to_types(send, press, fsm, main_m
     state = fsm(1)
     msg = await say(send, state, "Купить хлеб")
 
-    [menu] = msg.answered
+    # кнопки главного меню внизу сменяются на «❌ Отмена», затем — выбор типа
+    carrier, menu = msg.answered
+    assert carrier.text == "Создание напоминания"
+    assert reply_rows(markup_of(carrier)) == [[CANCEL]]
     assert menu.text == TYPE_QUESTION
     assert isinstance(markup_of(menu), InlineKeyboardMarkup)
+    assert visible_keyboard(msg.answered) == [[CANCEL]]
     assert await state.get_state() == main_module.ReminderFlow.waiting_for_repeat_type.state
 
     await tap(press, state, menu, "repeat_hourly")
@@ -803,9 +807,11 @@ async def test_inline_cancel_button_from_old_versions(send, press, fsm):
     assert menu.answered[-1].answered[-1].text == CANCELED
 
 
+@pytest.mark.parametrize("started_by", ["button", "text", "photo", "forward"])
 @pytest.mark.parametrize("repeat", ["once", "hourly", "daily", "weekly", "monthly"])
-async def test_cancel_on_keyboard_during_whole_creation(send, press, fsm, main_module, repeat):
-    """Начали с «➕» — на каждом шаге внизу есть «❌ Отмена»; с итогом внизу снова главное меню."""
+async def test_cancel_on_keyboard_during_whole_creation(send, press, fsm, main_module, repeat, started_by):
+    """С «➕» или сразу текстом / вложением / пересланным — на каждом шаге внизу «❌ Отмена»
+    вместо кнопок главного меню; с итогом внизу снова главное меню."""
     await make_user(1, tz="UTC")
     state = fsm(1)
     start_msg = FakeMessage(1, text="/start")
@@ -816,9 +822,16 @@ async def test_cancel_on_keyboard_during_whole_creation(send, press, fsm, main_m
         keyboard = visible_keyboard(bot_messages(*users))
         assert keyboard and [CANCEL] in keyboard, keyboard
 
-    users.append(await open_menu(send, state))
-    check()
-    users.append(await say(send, state, "купить хлеб"))
+    if started_by == "button":
+        users.append(await open_menu(send, state))
+        check()
+        users.append(await say(send, state, "купить хлеб"))
+    elif started_by == "text":
+        users.append(await say(send, state, "купить хлеб"))
+    elif started_by == "photo":
+        users.append(await say(send, state, photo=[SimpleNamespace(file_id="p")], caption="хлеб"))
+    else:
+        users.append(await say(send, state, "купить хлеб", forward_origin=SimpleNamespace(type="user")))
     check()
     menu = users[-1].answered[-1]
     await tap(press, state, menu, f"repeat_{repeat}")

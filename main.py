@@ -101,6 +101,8 @@ NO_TIMEZONE = "❌ Сначала установите часовой пояс: 
 CANCELED = "🛑 Создание напоминания отменено.\nВыберите действие:"
 # Шаги создания — тексты прошлой версии бота
 TEXT_STEP = "📝 Отправьте текст или вложение для напоминания:"
+# Создание началось сразу с текста: это сообщение меняет кнопки главного меню внизу на «❌ Отмена»
+TEXT_GIVEN_STEP = "Создание напоминания"
 TYPE_STEP = "🔄 Выберите тип повторения:"
 FORWARD_TYPE_STEP = "↪️ Пересланное сообщение принято. Выберите тип повторения:"
 UNSUPPORTED_CONTENT = "❌ Поддерживаются текст, фото, видео, аудио, голосовые, документы и другие вложения."
@@ -964,6 +966,8 @@ async def auto_create_reminder(message: Message, state: FSMContext):
     await state.set_data({})
     await save_content(message, state, content)
     await state.set_state(ReminderFlow.waiting_for_repeat_type)
+    # Внизу вместо кнопок главного меню — «❌ Отмена» (выбор типа — кнопками в сообщении, клавиатуру не меняет)
+    await message.answer(TEXT_GIVEN_STEP, reply_markup=get_cancel_keyboard())
     await message.answer(FORWARD_TYPE_STEP if is_forwarded(message) else TYPE_STEP,
                          reply_markup=get_repeat_type_keyboard())
 
