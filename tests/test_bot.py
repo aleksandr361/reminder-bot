@@ -319,14 +319,14 @@ def marked_days(markup):
     return days
 
 
-async def test_calendar_marks_today_in_users_timezone(send, fsm, main_module):
+async def test_calendar_marks_today_in_users_timezone(press, fsm, main_module):
     tz = "Pacific/Kiritimati"  # UTC+14: «сегодня» здесь часто уже не то, что у сервера
     await make_user(1, tz=tz)
     state = fsm(1)
-    await state.update_data(repeat_type="once")
-    await state.set_state(main_module.ReminderFlow.waiting_for_text)
-    msg = FakeMessage(1, text="x")
-    await send(msg, state)  # после текста бот присылает календарь
+    await state.update_data(content_type="text", file_id=None, text="x")
+    await state.set_state(main_module.ReminderFlow.waiting_for_repeat_type)
+    msg = FakeMessage(1, text="Выберите тип повторения:")
+    await press(FakeCallback("repeat_once", msg), state)  # после «Однократно» бот присылает календарь
 
     today = datetime.now(ZoneInfo(tz)).date()
     markup = msg.answered[-1].kwargs["reply_markup"]

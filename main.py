@@ -81,8 +81,10 @@ MONTH_DAYS_STEP = (
     "напоминание придёт в последний день этого месяца."
 )
 BUTTONS_HINT = "👆 Выберите вариант кнопками в сообщении выше или нажмите «❌ Отмена»."
-# Служебное сообщение, которое только меняет нижнюю клавиатуру: бот сразу его удаляет
-KEYBOARD_SWITCH = "⏳"
+# Первый вопрос создания: он держит клавиатуру с «❌ Отмена» до конца диалога
+TEXT_STEP = "Отправьте текст или вложение для напоминания:"
+# Если создание началось с текста, вопроса о тексте нет — «❌ Отмена» держит это сообщение
+TEXT_GIVEN_STEP = "Создание напоминания"
 # 1430, 930, 14:30, 14.30, 14 30
 TIME_RE = re.compile(r"([01]?\d|2[0-3])[:.\s-]?([0-5]\d)")
 
@@ -261,13 +263,13 @@ async def send_settings(message: Message):
 # Каждый шаг — одно сообщение: «[уже выбранное правило]» → «что сделать сейчас».
 #
 # «❌ Отмена» — на нижней клавиатуре и только пока создаётся напоминание. Нижнюю клавиатуру приносит
-# новое сообщение бота, и она остаётся, даже если это сообщение удалить (проверено в Telegram).
-# Сообщение с кнопками внутри нижнюю клавиатуру нести не может, поэтому в начале создания бот
-# присылает служебное «⏳» с клавиатурой «❌ Отмена» и удаляет его сразу после сообщения шага:
-# в чате — только шаг, внизу — «❌ Отмена». Шаги с кнопками в сообщении (меню, числа, календарь,
-# дни недели, режим и дни месяца) и шаг текста нижнюю клавиатуру не меняют. Свою клавиатуру
-# (часы и «❌ Отмена») приносит шаг времени — последний. Итог («✅ Напоминание установлено») или
-# отмена возвращают главное меню, а в нём «❌ Отмена» нет.
+# сообщение бота, и на Android она пропадает, если это сообщение удалить. А сообщение с кнопками
+# внутри нижнюю клавиатуру нести не может. Поэтому создание начинается с вопроса о тексте
+# (TEXT_STEP, или TEXT_GIVEN_STEP, если текст уже прислали): он приходит с клавиатурой «❌ Отмена»
+# и остаётся в чате до конца диалога (anchor_id), а шаги после него — по одному сообщению
+# с кнопками — исчезают, как только пройдены. Свою клавиатуру (часы и «❌ Отмена») приносит шаг
+# времени — последний. Итог («✅ Напоминание установлено») или отмена возвращают главное меню
+# (в нём «❌ Отмена» нет), и тогда удаляется и вопрос о тексте.
 
 async def remember_prompt(state: FSMContext, *messages: Message):
     """Запомнить вопросы бота, чтобы убрать их, когда пользователь ответит."""
@@ -286,14 +288,21 @@ async def delete_quietly(bot: Bot, chat_id: int, message_ids: list[int]):
 
 
 async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext):
-    """Удалить запомненные вопросы бота."""
+    """Удалить запомненные вопросы бота (вопрос о тексте с «❌ Отмена» остаётся)."""
     await delete_quietly(bot, chat_id, (await state.get_data()).get('prompt_ids', []))
     await state.update_data(prompt_ids=[])
 
 
-async def switch_keyboard(message: Message, keyboard) -> Message:
-    """Поменять нижнюю клавиатуру служебным «⏳». Удалить его можно сразу — клавиатура останется."""
-    return await message.answer(KEYBOARD_SWITCH, reply_markup=keyboard)
+def flow_message_ids(data: dict) -> list[int]:
+    """Все сообщения бота в диалоге: вопросы шагов и вопрос о тексте."""
+    anchor = [data['anchor_id']] if data.get('anchor_id') else []
+    return list(data.get('prompt_ids', [])) + anchor
+
+
+async def end_flow(bot: Bot, chat_id: int, state: FSMContext):
+    """Диалог закончен (итог уже отправлен вместе с главным меню): убрать все его сообщения."""
+    await delete_quietly(bot, chat_id, flow_message_ids(await state.get_data()))
+    await state.clear()
 
 
 async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str, *,
@@ -301,8 +310,7 @@ async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, in
     """Отправить шаг диалога одним сообщением и убрать вопросы предыдущего шага.
 
     inline — кнопки в сообщении; keyboard — своя нижняя клавиатура (только у шага времени).
-    Без keyboard нижняя клавиатура не меняется — на ней остаётся «❌ Отмена», поставленная
-    в начале создания.
+    Без keyboard нижняя клавиатура не меняется — на ней остаётся «❌ Отмена» от вопроса о тексте.
     """
     text = f"{rule}\n\n{instruction}" if rule else instruction
     step = await message.answer(text, reply_markup=inline or keyboard)
@@ -336,19 +344,25 @@ async def start_new_reminder(message: Message, state: FSMContext, bot: Bot, cont
         await message.answer("❌ Сначала установите часовой пояс: /timezone")
         return
 
-    # Если прошлый диалог бросили на середине — его выбор не нужен, а вопросы уберём
-    old_prompts = (await state.get_data()).get('prompt_ids', [])
-    await state.set_data({'prompt_ids': old_prompts})
-    # Внизу появляется «❌ Отмена»; служебное «⏳» исчезнет вместе со старыми вопросами,
-    # как только придёт сообщение шага
-    await remember_prompt(state, await switch_keyboard(message, get_cancel_keyboard()))
+    # Если прошлый диалог бросили на середине — его выбор не нужен, а сообщения уберём,
+    # когда придёт новый вопрос с «❌ Отмена» (иначе клавиатура пропала бы раньше времени)
+    old_ids = flow_message_ids(await state.get_data())
+    anchor = await message.answer(TEXT_GIVEN_STEP if content else TEXT_STEP, reply_markup=get_cancel_keyboard())
+    await state.set_data({'anchor_id': anchor.message_id, 'prompt_ids': old_ids})
     if content:
         content_type, file_id, text = content
         await state.update_data(content_type=content_type, file_id=file_id, text=text)
-        await show_step(message, state, bot, describe_content(content_type, text), "Выберите тип повторения:",
-                        inline=get_repeat_type_keyboard())
+        await ask_repeat_type(message, state, bot)  # старые сообщения уберёт шаг
     else:
-        await show_step(message, state, bot, "", "Выберите тип повторения:", inline=get_repeat_type_keyboard())
+        await delete_prompts(bot, message.chat.id, state)
+        await state.set_state(ReminderFlow.waiting_for_text)
+
+
+async def ask_repeat_type(message: Message, state: FSMContext, bot: Bot):
+    """Шаг после текста: тип повторения."""
+    data = await state.get_data()
+    await show_step(message, state, bot, describe_content(data.get('content_type'), data.get('text')),
+                    "Выберите тип повторения:", inline=get_repeat_type_keyboard())
     await state.set_state(ReminderFlow.waiting_for_repeat_type)
 
 
@@ -380,15 +394,10 @@ async def ask_details(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(F.text == BTN_CANCEL)
 async def cancel_flow(message: Message, state: FSMContext, bot: Bot):
-    if await state.get_state() is None:
-        # Отменять нечего (например, бот перезапускался и забыл диалог): молча возвращаем главное
-        # меню — нажатие и служебное «⏳» сразу удаляются, чтобы не засорять чат
-        switch = await switch_keyboard(message, get_main_menu_keyboard())
-        await delete_quietly(bot, message.chat.id, [message.message_id, switch.message_id])
-        return
+    # Вне диалога «❌ Отмена» бывает внизу, если бот перезапускался и забыл диалог, или от старого
+    # меню — тогда тоже возвращаем главное меню
     await message.answer("❌ Создание напоминания отменено.", reply_markup=get_main_menu_keyboard())
-    await delete_prompts(bot, message.chat.id, state)
-    await state.clear()
+    await end_flow(bot, message.chat.id, state)
 
 
 @router.callback_query(F.data == CANCEL_DATA)
@@ -398,8 +407,7 @@ async def cancel_flow_button(callback: CallbackQuery, state: FSMContext, bot: Bo
     if await state.get_state() is not None:
         await callback.message.answer("❌ Создание напоминания отменено.", reply_markup=get_main_menu_keyboard())
     await remember_prompt(state, callback.message)  # старая кнопка из прошлого диалога тоже исчезнет
-    await delete_prompts(bot, callback.message.chat.id, state)
-    await state.clear()
+    await end_flow(bot, callback.message.chat.id, state)
 
 
 # ---------- Часовой пояс ----------
@@ -532,13 +540,9 @@ async def cmd_remind(message: Message, state: FSMContext, bot: Bot):
 
 
 # ---------- Создание напоминания ----------
-# Тип → текст или вложение → параметры типа → время → «✅ Напоминание установлено».
+# Текст или вложение → тип → параметры типа → время → «✅ Напоминание установлено».
 
-# Тип можно выбрать и передумать, пока бот ждёт текст
-@router.callback_query(
-    StateFilter(ReminderFlow.waiting_for_repeat_type, ReminderFlow.waiting_for_text),
-    F.data.startswith("repeat_"),
-)
+@router.callback_query(ReminderFlow.waiting_for_repeat_type, F.data.startswith("repeat_"))
 async def repeat_type_selected(callback: CallbackQuery, state: FSMContext, bot: Bot):
     repeat_type = callback.data.removeprefix("repeat_")
     if repeat_type not in REPEAT_TYPES:
@@ -547,12 +551,7 @@ async def repeat_type_selected(callback: CallbackQuery, state: FSMContext, bot: 
 
     await state.update_data(repeat_type=repeat_type)
     await callback.answer()
-    if 'content_type' in await state.get_data():
-        await ask_details(callback.message, state, bot)  # текст уже прислали — сразу дальше
-    else:
-        await show_step(callback.message, state, bot, REPEAT_LABELS[repeat_type],
-                        "Отправьте текст или вложение для напоминания:")
-        await state.set_state(ReminderFlow.waiting_for_text)
+    await ask_details(callback.message, state, bot)
 
 
 @router.message(ReminderFlow.waiting_for_text)
@@ -564,7 +563,7 @@ async def remind_content(message: Message, state: FSMContext, bot: Bot):
 
     content_type, file_id, text = content
     await state.update_data(content_type=content_type, file_id=file_id, text=text)
-    await ask_details(message, state, bot)
+    await ask_repeat_type(message, state, bot)
 
 
 @router.message(ReminderFlow.waiting_for_interval)
@@ -839,8 +838,7 @@ async def finalize_reminder(message: Message, state: FSMContext, bot: Bot, start
         lines.append(html.escape(month_note(config)))
     lines.append(f"🕰 {when}" if repeat_type == 'once' else f"🕰 Следующее: {when}")
     await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=get_main_menu_keyboard())
-    await delete_prompts(bot, message.chat.id, state)  # остаётся только итог
-    await state.clear()
+    await end_flow(bot, message.chat.id, state)  # остаётся только итог
 
 
 # ---------- Список напоминаний ----------
