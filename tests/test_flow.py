@@ -146,7 +146,7 @@ async def test_after_text_bot_offers_five_types(send, fsm, bot):
     content = await say(send, state, "купить хлеб")
 
     [menu] = content.answered
-    assert menu.text == "купить хлеб\n\nВыберите тип повторения:"
+    assert menu.text == "Выберите тип повторения:"  # текст напоминания виден выше — не повторяем
     assert inline_datas(markup_of(menu)) == [
         "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly"
     ]
@@ -221,7 +221,7 @@ async def test_every_way_to_start_shows_cancel(send, press, fsm, bot, main_modul
     assert visible_keyboard(bot, origin.answered) == [[CANCEL]]
     texts = [m.text for m in left_in_chat(bot, origin.answered)]
     if how == "text":
-        assert texts == ["Создание напоминания", "купить хлеб\n\nВыберите тип повторения:"]
+        assert texts == ["Создание напоминания", "Выберите тип повторения:"]
         assert isinstance(markup_of(origin.answered[-1]), InlineKeyboardMarkup)
     else:
         assert texts == [TEXT_QUESTION]
@@ -574,7 +574,7 @@ async def test_text_outside_flow_starts_reminder(send, press, fsm, bot, main_mod
     msg = await say(send, state, "Купить хлеб")
 
     assert [m.text for m in left_in_chat(bot, msg.answered)] == [
-        "Создание напоминания", "Купить хлеб\n\nВыберите тип повторения:"]
+        "Создание напоминания", "Выберите тип повторения:"]
     assert await state.get_state() == main_module.ReminderFlow.waiting_for_repeat_type.state
 
     # Текст уже есть — после выбора типа сразу следующий шаг

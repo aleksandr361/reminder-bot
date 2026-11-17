@@ -359,10 +359,8 @@ async def start_new_reminder(message: Message, state: FSMContext, bot: Bot, cont
 
 
 async def ask_repeat_type(message: Message, state: FSMContext, bot: Bot):
-    """Шаг после текста: тип повторения."""
-    data = await state.get_data()
-    await show_step(message, state, bot, describe_content(data.get('content_type'), data.get('text')),
-                    "Выберите тип повторения:", inline=get_repeat_type_keyboard())
+    """Шаг после текста: тип повторения. Текст напоминания уже виден в чате выше — не повторяем его."""
+    await show_step(message, state, bot, "", "Выберите тип повторения:", inline=get_repeat_type_keyboard())
     await state.set_state(ReminderFlow.waiting_for_repeat_type)
 
 
