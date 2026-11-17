@@ -30,6 +30,7 @@ from keyboards import (
     CANCEL_DATA,
     get_timezone_geo_or_manual,
     get_timezone_geo_button,
+    get_cancel_keyboard,
     get_time_keyboard,
     get_calendar,
     get_main_menu_keyboard,
@@ -80,6 +81,8 @@ MONTH_DAYS_STEP = (
     "напоминание придёт в последний день этого месяца."
 )
 BUTTONS_HINT = "👆 Выберите вариант кнопками в сообщении выше или нажмите «❌ Отмена»."
+# Служебное сообщение, которое только меняет нижнюю клавиатуру: бот сразу его удаляет
+KEYBOARD_SWITCH = "⏳"
 # 1430, 930, 14:30, 14.30, 14 30
 TIME_RE = re.compile(r"([01]?\d|2[0-3])[:.\s-]?([0-5]\d)")
 
@@ -257,13 +260,14 @@ async def send_settings(message: Message):
 # ---------- Шаги диалога ----------
 # Каждый шаг — одно сообщение: «[уже выбранное правило]» → «что сделать сейчас».
 #
-# «❌ Отмена» всегда на нижней клавиатуре. Нижнюю клавиатуру в Telegram задаёт последнее сообщение
-# бота с клавиатурой, и если его удалить — она пропадает; а сообщение с кнопками внутри своей
-# нижней клавиатуры нести не может. Поэтому «❌ Отмена» — постоянная кнопка главного меню, которое
-# держат итоговые сообщения («✅ Напоминание установлено», /start и т.п.): их бот не удаляет.
-# Шаги с кнопками в сообщении (меню, числа, календарь, дни недели, режим и дни месяца) и шаг текста
-# нижнюю клавиатуру не меняют. Свою клавиатуру (часы и «❌ Отмена») приносит только шаг времени —
-# последний, после него главное меню возвращается с итоговым сообщением.
+# «❌ Отмена» — на нижней клавиатуре и только пока создаётся напоминание. Нижнюю клавиатуру приносит
+# новое сообщение бота, и она остаётся, даже если это сообщение удалить (проверено в Telegram).
+# Сообщение с кнопками внутри нижнюю клавиатуру нести не может, поэтому в начале создания бот
+# присылает служебное «⏳» с клавиатурой «❌ Отмена» и удаляет его сразу после сообщения шага:
+# в чате — только шаг, внизу — «❌ Отмена». Шаги с кнопками в сообщении (меню, числа, календарь,
+# дни недели, режим и дни месяца) и шаг текста нижнюю клавиатуру не меняют. Свою клавиатуру
+# (часы и «❌ Отмена») приносит шаг времени — последний. Итог («✅ Напоминание установлено») или
+# отмена возвращают главное меню, а в нём «❌ Отмена» нет.
 
 async def remember_prompt(state: FSMContext, *messages: Message):
     """Запомнить вопросы бота, чтобы убрать их, когда пользователь ответит."""
@@ -272,15 +276,24 @@ async def remember_prompt(state: FSMContext, *messages: Message):
     await state.update_data(prompt_ids=list(dict.fromkeys(ids)))
 
 
-async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext):
-    """Удалить запомненные вопросы бота. Если сообщение уже не удалить — не страшно."""
-    old = (await state.get_data()).get('prompt_ids', [])
-    if old:
+async def delete_quietly(bot: Bot, chat_id: int, message_ids: list[int]):
+    """Удалить сообщения. Если какое-то уже не удалить — не страшно."""
+    if message_ids:
         try:
-            await bot.delete_messages(chat_id, old)
+            await bot.delete_messages(chat_id, message_ids)
         except TelegramAPIError as e:
-            logging.debug("Не удалось удалить сообщения %s: %s", old, e)
+            logging.debug("Не удалось удалить сообщения %s: %s", message_ids, e)
+
+
+async def delete_prompts(bot: Bot, chat_id: int, state: FSMContext):
+    """Удалить запомненные вопросы бота."""
+    await delete_quietly(bot, chat_id, (await state.get_data()).get('prompt_ids', []))
     await state.update_data(prompt_ids=[])
+
+
+async def switch_keyboard(message: Message, keyboard) -> Message:
+    """Поменять нижнюю клавиатуру служебным «⏳». Удалить его можно сразу — клавиатура останется."""
+    return await message.answer(KEYBOARD_SWITCH, reply_markup=keyboard)
 
 
 async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, instruction: str, *,
@@ -288,7 +301,8 @@ async def show_step(message: Message, state: FSMContext, bot: Bot, rule: str, in
     """Отправить шаг диалога одним сообщением и убрать вопросы предыдущего шага.
 
     inline — кнопки в сообщении; keyboard — своя нижняя клавиатура (только у шага времени).
-    Без keyboard нижняя клавиатура не меняется — на ней остаётся «❌ Отмена» из главного меню.
+    Без keyboard нижняя клавиатура не меняется — на ней остаётся «❌ Отмена», поставленная
+    в начале создания.
     """
     text = f"{rule}\n\n{instruction}" if rule else instruction
     step = await message.answer(text, reply_markup=inline or keyboard)
@@ -325,6 +339,9 @@ async def start_new_reminder(message: Message, state: FSMContext, bot: Bot, cont
     # Если прошлый диалог бросили на середине — его выбор не нужен, а вопросы уберём
     old_prompts = (await state.get_data()).get('prompt_ids', [])
     await state.set_data({'prompt_ids': old_prompts})
+    # Внизу появляется «❌ Отмена»; служебное «⏳» исчезнет вместе со старыми вопросами,
+    # как только придёт сообщение шага
+    await remember_prompt(state, await switch_keyboard(message, get_cancel_keyboard()))
     if content:
         content_type, file_id, text = content
         await state.update_data(content_type=content_type, file_id=file_id, text=text)
@@ -364,11 +381,10 @@ async def ask_details(message: Message, state: FSMContext, bot: Bot):
 @router.message(F.text == BTN_CANCEL)
 async def cancel_flow(message: Message, state: FSMContext, bot: Bot):
     if await state.get_state() is None:
-        # Отменять нечего — молча убираем нажатие, чтобы не засорять чат
-        try:
-            await bot.delete_message(message.chat.id, message.message_id)
-        except TelegramAPIError:
-            pass
+        # Отменять нечего (например, бот перезапускался и забыл диалог): молча возвращаем главное
+        # меню — нажатие и служебное «⏳» сразу удаляются, чтобы не засорять чат
+        switch = await switch_keyboard(message, get_main_menu_keyboard())
+        await delete_quietly(bot, message.chat.id, [message.message_id, switch.message_id])
         return
     await message.answer("❌ Создание напоминания отменено.", reply_markup=get_main_menu_keyboard())
     await delete_prompts(bot, message.chat.id, state)

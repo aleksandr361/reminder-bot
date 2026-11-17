@@ -1,6 +1,7 @@
 """Диалог создания напоминания по ТЗ:
 тип повторения → текст или вложение → параметры типа → время → «✅ Напоминание установлено».
-Каждый шаг начинается с уже выбранного правила; «❌ Отмена» всегда в клавиатуре.
+Каждый шаг начинается с уже выбранного правила. «❌ Отмена» появляется на нижней клавиатуре,
+как только начато создание, и уходит вместе с итогом — в главном меню её нет.
 """
 import calendar
 import json
@@ -15,6 +16,7 @@ from conftest import FakeCallback, FakeMessage, all_reminders, make_user
 
 UTC = timezone.utc
 CANCEL = "❌ Отмена"
+MAIN_MENU = [["➕ Новое напоминание"], ["📋 Мои напоминания", "⚙️ Настройки"]]
 TIME_INSTRUCTION = "Во сколько напоминать?\nВыберите время ниже или введите вручную (например: 1015)."
 
 
@@ -47,16 +49,22 @@ def shows_cancel(messages):
     return False
 
 
-def visible_keyboard(bot, messages):
-    """Какая нижняя клавиатура сейчас видна в Telegram.
-    Её задаёт последнее сообщение с клавиатурой; если его удалили — клавиатуры нет."""
+def visible_keyboard(messages):
+    """Какая нижняя клавиатура сейчас видна в Telegram. Её задаёт последнее сообщение бота с клавиатурой,
+    и она остаётся, даже если это сообщение удалить (проверено в Telegram 17.11.2026)."""
     with_kb = [m for m in messages if isinstance(markup_of(m), (ReplyKeyboardMarkup, ReplyKeyboardRemove))]
     if not with_kb:
         return None
     latest = max(with_kb, key=lambda m: m.message_id)
-    if latest.message_id in {mid for _, mid in bot.deleted} or isinstance(markup_of(latest), ReplyKeyboardRemove):
+    if isinstance(markup_of(latest), ReplyKeyboardRemove):
         return None
     return reply_rows(markup_of(latest))
+
+
+def left_in_chat(bot, messages):
+    """Сообщения бота, которые остались в чате (не удалены)."""
+    gone = {mid for _, mid in bot.deleted}
+    return [m for m in messages if m.message_id not in gone]
 
 
 def run_at_of_last():
@@ -115,11 +123,12 @@ def deleted_ids(bot):
 
 # ---------- 1. Меню ----------
 
-async def test_menu_has_five_types_and_cancel_keyboard(send, fsm):
+async def test_menu_has_five_types_and_cancel_keyboard(send, fsm, bot):
     await make_user(1, tz="UTC")
     start = await open_menu(send, fsm(1))
 
-    [menu] = start.answered  # одно сообщение, без «🆕 Новое напоминание»
+    [menu] = left_in_chat(bot, start.answered)  # в чате одно сообщение, без «🆕 Новое напоминание»
+    assert visible_keyboard(start.answered) == [[CANCEL]]  # а внизу появилась «❌ Отмена»
     assert menu.text == "Выберите тип повторения:"
     assert inline_datas(markup_of(menu)) == [
         "repeat_once", "repeat_hourly", "repeat_daily", "repeat_weekly", "repeat_monthly"
@@ -175,18 +184,41 @@ async def test_cancel_works_on_any_step(send, press, fsm, steps):
     cancel = await say(send, state, CANCEL)
     assert await state.get_state() is None
     assert "отменено" in cancel.answered[-1].text.lower()
-    assert ["➕ Новое напоминание"] in reply_rows(markup_of(cancel.answered[-1]))
+    assert reply_rows(markup_of(cancel.answered[-1])) == MAIN_MENU  # «❌ Отмена» больше не нужна
     assert await all_reminders() == []
 
 
-async def test_cancel_outside_flow_is_silent(send, fsm, bot):
-    """Вне создания напоминания «❌ Отмена» ничего не делает — нажатие тихо убирается из чата."""
+async def test_cancel_outside_flow_silently_returns_menu(send, fsm, bot):
+    """«❌ Отмена» вне создания (например, бот перезапускался и забыл диалог): внизу снова главное меню,
+    а в чате ничего не остаётся — ни нажатия, ни ответа."""
     await make_user(1, tz="UTC")
     state = fsm(1)
     cancel = await say(send, state, CANCEL)
     assert await state.get_state() is None
-    assert cancel.answered == []
+    assert visible_keyboard(cancel.answered) == MAIN_MENU
+    assert left_in_chat(bot, cancel.answered) == []
     assert cancel.message_id in deleted_ids(bot)
+
+
+@pytest.mark.parametrize("how", ["button", "command", "inline", "text"])
+async def test_every_way_to_start_shows_cancel(send, press, fsm, bot, main_module, how):
+    """С чего бы ни началось создание, внизу появляется «❌ Отмена», а в чате — только сообщение шага."""
+    await make_user(1, tz="UTC")
+    state = fsm(1)
+    if how == "inline":
+        origin = FakeMessage(1, text="📋 Список")
+        await press(FakeCallback("new_reminder", origin), state)
+    elif how == "command":
+        origin = FakeMessage(1, text="/remind")
+        await main_module.cmd_remind(origin, state, bot)
+    else:
+        origin = FakeMessage(1, text={"button": "➕ Новое напоминание", "text": "купить хлеб"}[how])
+        await send(origin, state)
+
+    assert visible_keyboard(origin.answered) == [[CANCEL]]
+    [step] = left_in_chat(bot, origin.answered)
+    assert "Выберите тип повторения:" in step.text
+    assert isinstance(markup_of(step), InlineKeyboardMarkup)
 
 
 # ---------- 3. Каждые N часов ----------
@@ -530,12 +562,12 @@ async def test_weekly_flow(send, press, fsm, main_module):
 
 # ---------- 7. Текст вне диалога запускает создание ----------
 
-async def test_text_outside_flow_starts_reminder(send, press, fsm, main_module):
+async def test_text_outside_flow_starts_reminder(send, press, fsm, bot, main_module):
     await make_user(1, tz="UTC")
     state = fsm(1)
     msg = await say(send, state, "Купить хлеб")
 
-    assert [m.text for m in msg.answered] == ["Купить хлеб\n\nВыберите тип повторения:"]
+    assert [m.text for m in left_in_chat(bot, msg.answered)] == ["Купить хлеб\n\nВыберите тип повторения:"]
     assert await state.get_state() == main_module.ReminderFlow.waiting_for_repeat_type.state
 
     # Текст уже есть — после выбора типа сразу следующий шаг
@@ -768,7 +800,7 @@ async def test_previous_question_disappears_right_after_choice(send, press, fsm,
     await make_user(1, tz="UTC")
     state = fsm(1)
     start = await open_menu(send, state)
-    [menu] = start.answered
+    [menu] = left_in_chat(bot, start.answered)
     await choose_type(press, state, menu, "once")
     assert menu.message_id in deleted_ids(bot)  # меню типов исчезло
 
@@ -812,7 +844,7 @@ async def test_restart_removes_questions_of_abandoned_flow(send, press, fsm, bot
     old_questions = list(content.answered)
     again = await open_menu(send, state)
     assert {m.message_id for m in old_questions} <= deleted_ids(bot)
-    assert not {m.message_id for m in again.answered} & deleted_ids(bot)
+    assert again.answered[-1].message_id not in deleted_ids(bot)  # новое меню на месте
 
 
 async def test_timezone_questions_disappear(send, press, fsm, bot):
@@ -853,7 +885,7 @@ async def test_failed_delete_does_not_break_flow(send, press, fsm, bot):
 
 
 
-# ---------- «❌ Отмена» всегда на клавиатуре, сообщений — минимум ----------
+# ---------- «❌ Отмена» на клавиатуре, пока создаётся напоминание; сообщений — минимум ----------
 
 async def walk(send, press, state, repeat, after_each):
     """Пройти сценарий, вызывая after_each(сообщения пользователя) после каждого действия."""
@@ -896,16 +928,17 @@ async def walk(send, press, state, repeat, after_each):
 
 
 @pytest.mark.parametrize("repeat", ["once", "hourly", "daily", "weekly", "monthly"])
-async def test_cancel_is_always_on_keyboard(send, press, fsm, bot, main_module, repeat):
-    """На каждом шаге «❌ Отмена» видна на нижней клавиатуре, а сообщение шага — одно и без неё внутри.
-    Клавиатуру с «❌ Отмена» держит постоянное меню (здесь его ставит /start)."""
+async def test_cancel_on_keyboard_only_while_creating(send, press, fsm, bot, main_module, repeat):
+    """В главном меню «❌ Отмена» нет. Как только начато создание, она видна внизу на каждом шаге,
+    а сообщение шага — одно и без неё внутри. С итогом внизу снова главное меню без «❌ Отмена»."""
     await make_user(1, tz="UTC")
     state = fsm(1)
     start_msg = FakeMessage(1, text="/start")
     await main_module.cmd_start(start_msg, state)
+    assert visible_keyboard(bot_messages(start_msg)) == MAIN_MENU
 
     async def check(users):
-        keyboard = visible_keyboard(bot, bot_messages(start_msg, *users))
+        keyboard = visible_keyboard(bot_messages(start_msg, *users))
         assert keyboard and [CANCEL] in keyboard, keyboard
         for m in bot_messages(*users):
             if isinstance(markup_of(m), InlineKeyboardMarkup):
@@ -913,7 +946,7 @@ async def test_cancel_is_always_on_keyboard(send, press, fsm, bot, main_module, 
 
     users, confirmation = await walk(send, press, state, repeat, check)
     assert "Напоминание установлено" in confirmation.text
-    assert ["➕ Новое напоминание"] in visible_keyboard(bot, bot_messages(start_msg, *users))
+    assert visible_keyboard(bot_messages(start_msg, *users)) == MAIN_MENU
 
 
 @pytest.mark.parametrize("repeat", ["once", "hourly", "daily", "weekly", "monthly"])
@@ -935,17 +968,19 @@ async def test_no_new_reminder_header_message(send, press, fsm, repeat):
     ("weekly", [1, 1, 1, 0, 1, 1]),  # отметка дня меняет то же сообщение
     ("monthly", [1, 1, 1, 1, 0, 1, 1]),
 ])
-async def test_messages_per_step(send, press, fsm, repeat, expected):
+async def test_messages_per_step(send, press, fsm, bot, repeat, expected):
+    """Сколько новых сообщений бота остаётся в чате после каждого действия
+    (служебное сообщение, которое бот тут же удалил, не в счёт)."""
     await make_user(1, tz="UTC")
-    counts, seen = [], [0]
+    counts, seen = [], set()
 
     async def count(users):
-        total = len(bot_messages(*users))
-        counts.append(total - seen[0])
-        seen[0] = total
+        new = [m for m in bot_messages(*users) if m.message_id not in seen]
+        seen.update(m.message_id for m in new)
+        counts.append(len(left_in_chat(bot, new)))
 
     users, _ = await walk(send, press, fsm(1), repeat, count)
-    counts.append(len(bot_messages(*users)) - seen[0])
+    await count(users)
     assert counts == expected
 
 
@@ -961,7 +996,7 @@ async def test_inline_cancel_button_cancels_flow(send, press, fsm, bot):
     assert cb.answers
     done = calendar_msg.answered[-1]
     assert "отменено" in done.text.lower()
-    assert ["➕ Новое напоминание"] in reply_rows(markup_of(done))
+    assert reply_rows(markup_of(done)) == MAIN_MENU
     assert calendar_msg.message_id in deleted_ids(bot)
     assert await all_reminders() == []
 

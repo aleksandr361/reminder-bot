@@ -15,7 +15,8 @@ from aiogram.types import (
 BTN_NEW = "➕ Новое напоминание"
 BTN_LIST = "📋 Мои напоминания"
 BTN_SETTINGS = "⚙️ Настройки"
-# «❌ Отмена» всегда на нижней клавиатуре: в главном меню и на клавиатуре времени
+# «❌ Отмена» — на нижней клавиатуре, только пока создаётся напоминание
+# (get_cancel_keyboard и клавиатура времени); в главном меню её нет
 BTN_CANCEL = "❌ Отмена"
 BTN_CONFIRM = "✔ Подтвердить выбор"
 BTN_START_NOW = "📍 С текущего момента"
@@ -71,8 +72,6 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=BTN_NEW)],
             [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_SETTINGS)],
-            # Постоянно внизу: на шагах с кнопками в сообщении отмена берётся отсюда
-            [KeyboardButton(text=BTN_CANCEL)],
         ],
         resize_keyboard=True,
     )

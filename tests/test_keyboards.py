@@ -150,15 +150,13 @@ async def test_main_menu_buttons_reach_main_handlers(main_module, send, fsm):
     markup = kb.get_main_menu_keyboard()
     assert isinstance(markup, ReplyKeyboardMarkup)
     rows = [[b.text for b in row] for row in markup.keyboard]
-    assert rows[-1] == ["❌ Отмена"]  # «❌ Отмена» всегда на клавиатуре
-    texts = [t for row in rows for t in row]
-    assert len(texts) == 4
-    for text in texts:
+    # «❌ Отмена» в главном меню нет: она появляется, только пока создаётся напоминание
+    assert rows == [["➕ Новое напоминание"], ["📋 Мои напоминания", "⚙️ Настройки"]]
+    for text in [t for row in rows for t in row]:
         msg = FakeMessage(1, text=text)
         result = await send(msg, fsm(1))
         assert result is not UNHANDLED, text
-        if text != "❌ Отмена":  # вне создания напоминания отмена молча убирается
-            assert msg.sent, text
+        assert msg.sent, text
 
 
 async def test_geo_button_requests_location():
